@@ -133,3 +133,17 @@ def test_malformed_outcome_is_not_coerced(caplog):
     provider = TheOddsApiProvider("secret")
     assert provider._normalize_event(payload, datetime.now(timezone.utc)) == []
     assert "without coercion" in caplog.text
+
+
+def test_http_error_does_not_expose_api_key():
+    def handler(request: httpx.Request):
+        return httpx.Response(401, json={"message": "unauthorized"})
+
+    async def fetch():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await TheOddsApiProvider("super-secret", client=client).fetch_nfl_player_props()
+
+    with pytest.raises(TheOddsApiError) as caught:
+        run(fetch())
+    assert "super-secret" not in str(caught.value)
+    assert str(caught.value).endswith("/sports/americanfootball_nfl/events")

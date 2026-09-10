@@ -69,6 +69,7 @@ class TheOddsApiProvider(OddsProvider):
             "requests_last": None,
             "http_requests": 0,
         }
+        self.upcoming_event_count = 0
 
     async def fetch_nfl_player_props(self) -> list[MarketSnapshot]:
         if not self.api_key:
@@ -85,6 +86,7 @@ class TheOddsApiProvider(OddsProvider):
 
             rows: list[MarketSnapshot] = []
             now = datetime.now(timezone.utc)
+            upcoming_events: list[dict[str, Any]] = []
             for event in events:
                 event_id = event.get("id") if isinstance(event, dict) else None
                 if not isinstance(event_id, str) or not event_id:
@@ -93,6 +95,10 @@ class TheOddsApiProvider(OddsProvider):
                 commence = _parse_datetime(event.get("commence_time"))
                 if commence is not None and commence < now:
                     continue
+                upcoming_events.append(event)
+            self.upcoming_event_count = len(upcoming_events)
+            for event in upcoming_events:
+                event_id = event["id"]
                 payload = await self._get_json(
                     client,
                     f"/sports/{NFL_SPORT_KEY}/events/{event_id}/odds",
@@ -124,7 +130,12 @@ class TheOddsApiProvider(OddsProvider):
                         delay = float(retry_after) if retry_after else 0.5 * (2**attempt)
                         await self._sleep(delay)
                         continue
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise TheOddsApiError(
+                        f"The Odds API returned HTTP {response.status_code} for {path}"
+                    ) from exc
                 try:
                     return response.json()
                 except ValueError as exc:

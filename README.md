@@ -63,5 +63,13 @@ quota headers; it retries rate limits and transient provider failures. See the
 
 This integration only reads market data. It does not submit wagers.
 
+Run the live, read-only smoke report after injecting the key through your environment's secret manager (never commit it to `.env`):
+
+```bash
+DEMO_MODE=false python -m scripts.smoke_the_odds_api
+```
+
+The JSON report contains upcoming event count, Hard Rock row count, per-market coverage, provider freshness, quota headers, missing markets, and sanitized API errors.
+
 ## Codex
 Open this repository in Codex and tell it to read `CODEX.md` first.
