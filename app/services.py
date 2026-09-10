@@ -23,7 +23,9 @@ def source_quality(rows: list[MarketSnapshot], stale_after_seconds: int = 180) -
             "stale_pct": round(100 * sum(a > stale_after_seconds for a in ages) / len(ages), 1) if ages else None,
         }
 
-    hard_rock = by_source.get("hardrockbet_fl", [])
+    # The Odds API's provider-native bookmaker key is ``hardrockbet``; the
+    # fixture retains the explicit Florida suffix to make its intent obvious.
+    hard_rock = by_source.get("hardrockbet", []) + by_source.get("hardrockbet_fl", [])
     return {
         "hard_rock_present": bool(hard_rock),
         "total_quotes": len(rows),

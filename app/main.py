@@ -2,11 +2,14 @@ import asyncio
 from fastapi import FastAPI
 from app.config import settings
 from app.providers.demo import DemoOddsProvider, DemoKalshiProvider
+from app.providers.the_odds_api import TheOddsApiProvider
 from app.services import source_quality, disagreements
 
 app = FastAPI(title="NFL Prop Agent V1")
 
 async def load_rows():
+    if not settings.demo_mode:
+        return await TheOddsApiProvider().fetch_nfl_player_props()
     odds = DemoOddsProvider()
     kalshi = DemoKalshiProvider()
     a, b = await asyncio.gather(

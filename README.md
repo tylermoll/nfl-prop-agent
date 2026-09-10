@@ -50,5 +50,18 @@ KALSHI_PRIVATE_KEY_PATH=
 
 Exact provider endpoint details should be confirmed against each provider's current documentation before enabling production polling.
 
+### The Odds API (Milestone 1)
+
+The read-only v4 adapter discovers current `americanfootball_nfl` events, then
+requests the event-level `player_pass_yds`, `player_reception_yds`, and
+`player_receptions` markets. It requests the official `hardrockbet` bookmaker
+key by default so Florida availability is measured rather than inferred. The
+adapter preserves each raw outcome, provider update time, observation time, and
+quota headers; it retries rate limits and transient provider failures. See the
+[official v4 API guide](https://the-odds-api.com/liveapi/guides/v4/) and
+[official market list](https://the-odds-api.com/sports-odds-data/betting-markets.html).
+
+This integration only reads market data. It does not submit wagers.
+
 ## Codex
 Open this repository in Codex and tell it to read `CODEX.md` first.
