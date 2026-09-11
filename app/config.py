@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     shadow_starting_bankroll: float = 100
     shadow_nominal_unit: float = 10
     shadow_minimum_report_sample: int = 30
+    scheduler_slots_minutes: tuple[int, ...] = (1440, 360, 90, 15)
+    scheduler_tolerance_minutes: int = 10
+    scheduler_final_capture_minutes: int | None = None
+    scheduler_min_quota_reserve: int = 25
+    scheduler_max_credits_per_run: int = 12
+    scheduler_max_games_per_run: int = 4
+    scheduler_retry_budget: int = 2
+    scheduler_provider_stale_seconds: int = 300
+    scheduler_model_stale_seconds: int = 3600
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

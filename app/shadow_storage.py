@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, insert, select
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, MetaData, String, Table, UniqueConstraint, create_engine, insert, select, update
 from app.math_utils import american_to_decimal
 
 metadata = MetaData()
@@ -25,6 +25,15 @@ settlements = Table("shadow_settlements", metadata,
     Column("actual_value", Float, nullable=False), Column("result", String, nullable=False),
     Column("profit_loss_per_dollar", Float, nullable=False), Column("fixed_unit", Float, nullable=False),
     Column("fixed_unit_profit_loss", Float, nullable=False), Column("result_source_id", String))
+scheduler_slots = Table("shadow_capture_slots", metadata,
+    Column("event_id", String, nullable=False), Column("slot", String, nullable=False),
+    Column("target_time_utc", DateTime(timezone=True), nullable=False), Column("status", String, nullable=False),
+    Column("attempts", Integer, nullable=False, default=0), Column("reason", String),
+    Column("updated_at_utc", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("event_id", "slot", "target_time_utc", name="uq_shadow_capture_slot"))
+scheduler_executions = Table("shadow_scheduler_executions", metadata,
+    Column("execution_id", String(36), primary_key=True), Column("started_at_utc", DateTime(timezone=True), nullable=False),
+    Column("ended_at_utc", DateTime(timezone=True)), Column("details", JSON, nullable=False))
 
 class ShadowStore:
     def __init__(self, database_url: str):
@@ -34,6 +43,23 @@ class ShadowStore:
         allowed = {c.name for c in observations.columns}
         with self.engine.begin() as connection:
             connection.execute(insert(observations), {k: v for k, v in row.items() if k in allowed})
+    def complete_capture(self, rows: list[dict], slot_row: dict) -> None:
+        """Atomically append an immutable capture and mark its slot complete."""
+        allowed = {c.name for c in observations.columns}
+        with self.engine.begin() as connection:
+            for row in rows:
+                connection.execute(insert(observations), {k: v for k, v in row.items() if k in allowed})
+            existing = connection.execute(select(scheduler_slots).where(
+                scheduler_slots.c.event_id == slot_row["event_id"],
+                scheduler_slots.c.slot == slot_row["slot"],
+                scheduler_slots.c.target_time_utc == slot_row["target_time_utc"])).first()
+            if existing:
+                connection.execute(update(scheduler_slots).where(
+                    scheduler_slots.c.event_id == slot_row["event_id"],
+                    scheduler_slots.c.slot == slot_row["slot"],
+                    scheduler_slots.c.target_time_utc == slot_row["target_time_utc"]).values(**slot_row))
+            else:
+                connection.execute(insert(scheduler_slots), slot_row)
     def all(self) -> list[dict]:
         with self.engine.connect() as connection:
             return [dict(r._mapping) for r in connection.execute(select(observations).order_by(observations.c.observed_at_utc))]
@@ -61,3 +87,21 @@ class ShadowStore:
                     american_to_decimal(same_line[-1]["hard_rock_offered_odds"]) if len(same_line) > 1 else None)}
     def record_settlement(self, row: dict) -> None:
         with self.engine.begin() as connection: connection.execute(insert(settlements), row)
+
+    def slot_state(self, event_id: str, slot: str, target_time: datetime) -> dict | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(scheduler_slots).where(scheduler_slots.c.event_id == event_id,
+                scheduler_slots.c.slot == slot, scheduler_slots.c.target_time_utc == target_time)).first()
+            return dict(row._mapping) if row else None
+
+    def record_slot(self, row: dict) -> None:
+        """Upsert mutable attempt metadata; market observations remain append-only."""
+        existing = self.slot_state(row["event_id"], row["slot"], row["target_time_utc"])
+        with self.engine.begin() as c:
+            if existing:
+                c.execute(update(scheduler_slots).where(scheduler_slots.c.event_id == row["event_id"],
+                    scheduler_slots.c.slot == row["slot"], scheduler_slots.c.target_time_utc == row["target_time_utc"]).values(**row))
+            else: c.execute(insert(scheduler_slots), row)
+
+    def record_execution(self, row: dict) -> None:
+        with self.engine.begin() as c: c.execute(insert(scheduler_executions), row)

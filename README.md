@@ -19,6 +19,10 @@ settlement, reporting, and explicit market-history limitations are documented
 in [`docs/shadow-evaluation.md`](docs/shadow-evaluation.md). This framework is
 research-only and cannot place a wager or order.
 
+The quota-aware prospective capture scheduler, targeted event requests,
+idempotent slot ledger, dry-run CLI, cost model, and deployment guidance are
+documented in [`docs/snapshot-scheduler.md`](docs/snapshot-scheduler.md).
+
 ## What V1 does
 1. Pulls NFL event/prop data from odds providers.
 2. Pulls Kalshi market/trade/order-book data through an adapter.

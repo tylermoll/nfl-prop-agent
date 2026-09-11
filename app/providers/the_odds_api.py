@@ -93,9 +93,7 @@ class TheOddsApiProvider(OddsProvider):
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.timeout)
         try:
-            events = await self._get_json(
-                client, f"/sports/{NFL_SPORT_KEY}/events", {"dateFormat": "iso"}
-            )
+            events = await self.discover_events(client=client)
             if not isinstance(events, list):
                 raise TheOddsApiError("events response must be a JSON array")
 
@@ -118,21 +116,42 @@ class TheOddsApiProvider(OddsProvider):
             self.eligible_event_count = len(eligible_events)
             for event in eligible_events:
                 event_id = event["id"]
-                payload = await self._get_json(
-                    client,
-                    f"/sports/{NFL_SPORT_KEY}/events/{event_id}/odds",
-                    {
-                        "bookmakers": ",".join(self.bookmakers),
-                        "markets": ",".join(MARKET_MAP),
-                        "oddsFormat": "american",
-                        "dateFormat": "iso",
-                    },
-                )
-                rows.extend(self._normalize_event(payload, now))
+                rows.extend(await self.fetch_event_player_props(event_id, client=client, observed_at=now))
             return rows
         finally:
             if owns_client:
                 await client.aclose()
+
+    async def discover_events(self, *, client: httpx.AsyncClient | None = None) -> list[dict[str, Any]]:
+        """Return the inexpensive NFL event list without fetching any props."""
+        if not self.api_key:
+            raise RuntimeError("THE_ODDS_API_KEY is not configured")
+        owns = client is None and self._client is None
+        active = client or self._client or httpx.AsyncClient(timeout=self.timeout)
+        try:
+            payload = await self._get_json(active, f"/sports/{NFL_SPORT_KEY}/events", {"dateFormat": "iso"})
+            if not isinstance(payload, list):
+                raise TheOddsApiError("events response must be a JSON array")
+            return payload
+        finally:
+            if owns:
+                await active.aclose()
+
+    async def fetch_event_player_props(self, event_id: str, *, client: httpx.AsyncClient | None = None,
+                                       observed_at: datetime | None = None) -> list[MarketSnapshot]:
+        """Fetch only one known event, all canonical markets/books in one request."""
+        if not event_id or "/" in event_id:
+            raise ValueError("invalid event id")
+        owns = client is None and self._client is None
+        active = client or self._client or httpx.AsyncClient(timeout=self.timeout)
+        try:
+            payload = await self._get_json(active, f"/sports/{NFL_SPORT_KEY}/events/{event_id}/odds", {
+                "bookmakers": ",".join(self.bookmakers), "markets": ",".join(MARKET_MAP),
+                "oddsFormat": "american", "dateFormat": "iso"})
+            return self._normalize_event(payload, observed_at or datetime.now(timezone.utc))
+        finally:
+            if owns:
+                await active.aclose()
 
     async def _get_json(
         self, client: httpx.AsyncClient, path: str, params: dict[str, str]
