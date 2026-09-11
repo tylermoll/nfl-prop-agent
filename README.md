@@ -69,6 +69,48 @@ This integration only reads market data. It does not submit wagers.
 
 ## Price-aware consensus and Kalshi
 
+### Unified live opportunity scanner
+
+`GET /unified-opportunities` performs one read-only load of the existing Hard
+Rock/reference sportsbook and Kalshi adapters, then builds a deterministic
+report. It groups on an exactly normalized event label, whitespace/case-only
+player identity, canonical market, and numeric threshold. Provider-native game
+IDs are deliberately not equated across providers, and uncertain or incomplete
+identities are never fuzzy matched. An integer Kalshi `N+` title is normalized
+to the equivalent sportsbook Over line `N - 0.5`.
+
+Each exact match retains Hard Rock's raw American prices, implied and paired
+no-vig probabilities, the reference median line, same-threshold reference
+no-vig consensus, contributing books, and Kalshi bid, ask, descriptive
+midpoint, last trade, spread, timestamp, volume, and open interest. Kalshi
+contracts are also exposed as a non-interpolated threshold curve with
+monotonicity and nearest-below/exact/above points. The response has separate
+unmatched Hard Rock and Kalshi lists for coverage diagnosis.
+
+Signals are descriptive booleans: `line_divergence` uses the absolute Hard
+Rock/reference-median line difference; `price_divergence` compares Hard Rock's
+Over no-vig probability with the same-threshold Kalshi midpoint and executable
+bid/ask range; `cross_market_confirmation` means the reference line and Kalshi
+price point in the same Over/Under direction relative to Hard Rock; and
+`cross_market_conflict` means those directions differ. The midpoint is marked
+non-executable, no missing threshold is interpolated, and no action, expected
+value, or profitability label is produced.
+
+### Kalshi liquidity schema audit
+
+Kalshi's current market schema includes fixed-point `volume_fp` and
+`open_interest_fp` values represented as decimal strings, alongside deprecated
+legacy integer `volume` and `open_interest` fields. Normalization now prefers
+the fixed-point string fields and falls back to non-negative legacy numeric
+values. Missing, negative, or malformed values remain `null`; the scanner does
+not fabricate liquidity. Thus an older run that only accepted JSON numbers
+could report all liquidity unavailable even while quotes normalized correctly.
+See Kalshi's [official market API reference](https://docs.kalshi.com/api-reference/market/get-markets).
+
+The scanner preserves the four-day Odds API window and bounded,
+metadata-driven Kalshi discovery. It makes no order-book call by default and
+does not make any provider call beyond those already described below.
+
 `GET /divergences` keeps prices, vig-inclusive and no-vig probabilities,
 freshness, named matchups, reference min/max/median/range, and distinct
 same-line `better_price` and `better_line` fields. It makes no EV claim.

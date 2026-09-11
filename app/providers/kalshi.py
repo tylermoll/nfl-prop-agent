@@ -295,5 +295,15 @@ def _price(raw: dict, field: str) -> float | None:
 
 
 def _number(raw: dict, field: str) -> float | None:
-    value = raw.get(field)
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
+    # Current Kalshi schemas expose fixed-point counts as decimal strings in
+    # ``*_fp``. Retain the legacy numeric field fallback for older responses.
+    value = raw.get(f"{field}_fp")
+    if value is None:
+        value = raw.get(field)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None

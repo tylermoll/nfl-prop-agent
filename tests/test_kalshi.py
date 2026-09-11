@@ -27,6 +27,14 @@ def test_ambiguous_market_is_logged_and_excluded(caplog):
 def test_absent_liquidity_is_not_invented():
     row=normalize_kalshi_market(market(yes_bid=None,yes_ask=None,volume=None,open_interest=None),NOW)
     assert row.contract_price is None and row.volume is None and row.open_interest is None
+def test_fixed_point_string_liquidity_schema_is_normalized_with_legacy_fallback():
+    row=normalize_kalshi_market(market(volume=999,open_interest=888,volume_fp="200.50",open_interest_fp="75.00"),NOW)
+    assert row.volume==200.5 and row.open_interest==75.0
+    legacy=normalize_kalshi_market(market(volume=12,open_interest=3),NOW)
+    assert legacy.volume==12 and legacy.open_interest==3
+def test_invalid_or_missing_liquidity_is_not_fabricated():
+    row=normalize_kalshi_market(market(volume=None,open_interest=None,volume_fp="unknown",open_interest_fp="-1"),NOW)
+    assert row.volume is None and row.open_interest is None
 def test_optional_orderbook_is_delayed_until_after_validation_and_preserved():
     requests=[]
     def handler(request):
