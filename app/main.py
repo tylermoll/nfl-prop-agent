@@ -4,6 +4,7 @@ from app.config import settings
 from app.providers.demo import DemoOddsProvider, DemoKalshiProvider
 from app.providers.the_odds_api import TheOddsApiProvider
 from app.services import source_quality, disagreements
+from app.consensus import market_divergences
 
 app = FastAPI(title="NFL Prop Agent V1")
 
@@ -36,6 +37,16 @@ async def latest_markets():
 async def get_disagreements():
     rows = await load_rows()
     return disagreements(rows)
+
+@app.get("/divergences")
+async def get_divergences():
+    rows = await load_rows()
+    return market_divergences(
+        rows,
+        reference_bookmakers=settings.the_odds_api_reference_bookmakers,
+        target_bookmaker=settings.the_odds_api_target_bookmaker,
+        min_reference_books=settings.consensus_min_reference_books,
+    )
 
 if __name__ == "__main__":
     import uvicorn

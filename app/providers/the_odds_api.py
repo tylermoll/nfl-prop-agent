@@ -51,7 +51,7 @@ class TheOddsApiProvider(OddsProvider):
         self,
         api_key: str | None = None,
         *,
-        bookmakers: tuple[str, ...] = ("hardrockbet",),
+        bookmakers: tuple[str, ...] | None = None,
         timeout: float = 20,
         max_retries: int = 3,
         lookahead_days: float | None = None,
@@ -59,7 +59,12 @@ class TheOddsApiProvider(OddsProvider):
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.the_odds_api_key
-        self.bookmakers = bookmakers
+        self.bookmakers = bookmakers or (
+            settings.the_odds_api_target_bookmaker,
+            *settings.the_odds_api_reference_bookmakers,
+        )
+        # Fetch all books and markets in one event response, without duplicates.
+        self.bookmakers = tuple(dict.fromkeys(self.bookmakers))
         self.timeout = timeout
         self.max_retries = max_retries
         self.lookahead_days = (

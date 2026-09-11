@@ -44,6 +44,9 @@ Put keys in `.env` locally. Never commit `.env`.
 ```env
 THE_ODDS_API_KEY=
 THE_ODDS_API_LOOKAHEAD_DAYS=4
+THE_ODDS_API_REFERENCE_BOOKMAKERS='["draftkings","fanduel","betmgm","williamhill_us"]'
+THE_ODDS_API_TARGET_BOOKMAKER=hardrockbet
+CONSENSUS_MIN_REFERENCE_BOOKS=2
 ODDSPAPI_API_KEY=
 KALSHI_API_KEY_ID=
 KALSHI_PRIVATE_KEY_PATH=
@@ -75,6 +78,23 @@ Set `THE_ODDS_API_LOOKAHEAD_DAYS` to a positive number to adjust that window.
 The JSON report separates all discovered events from eligible events queried and
 contains Hard Rock row count, per-market coverage, provider freshness, HTTP
 request and quota-consumption accounting, missing markets, and sanitized API errors.
+
+### Reference consensus
+
+`GET /divergences` matches event, normalized player name, and canonical market
+across Hard Rock and the configured reference books. It reports raw Over/Under
+American prices alongside vig-inclusive implied probabilities, the median
+reference line, coverage, and whether Hard Rock is higher, lower, or the same.
+It identifies market divergence; it is not a betting recommendation.
+
+Hard Rock, DraftKings, FanDuel, BetMGM, and Caesars (`williamhill_us`) are sent
+together in one event-level request, and that response is reused for all three
+markets. Under the documented v4 formula, five explicitly selected bookmakers
+(fewer than ten) and three markets cost **3 credits per eligible event**; event
+discovery is free. One comparison run therefore costs `3 × E` credits and makes
+`1 + E` HTTP requests, where `E` is the number of unstarted NFL events in the
+four-day window. Retries can add HTTP requests; response quota headers are the
+source of truth for actual cost.
 
 ## Codex
 Open this repository in Codex and tell it to read `CODEX.md` first.

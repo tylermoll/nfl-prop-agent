@@ -10,10 +10,11 @@ class DemoOddsProvider(OddsProvider):
     async def fetch_nfl_player_props(self):
         rows = []
         books = [
-            ("hardrockbet_fl", 78.5, -105, -115),
+            ("hardrockbet", 78.5, -105, -115),
             ("draftkings", 80.5, -110, -110),
             ("fanduel", 80.5, -115, -105),
             ("betmgm", 79.5, -115, -105),
+            ("williamhill_us", 80.5, -110, -110),
         ]
         for book, line, over, under in books:
             for side, odds in [(Side.OVER, over), (Side.UNDER, under)]:
@@ -27,7 +28,7 @@ class DemoOddsProvider(OddsProvider):
                     line=line,
                     side=side,
                     american_odds=odds,
-                    source_updated_at_utc=NOW - timedelta(seconds=25 if book=="hardrockbet_fl" else 10),
+                    source_updated_at_utc=NOW - timedelta(seconds=25 if book=="hardrockbet" else 10),
                     raw={"demo": True},
                 ))
         return rows
