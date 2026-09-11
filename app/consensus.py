@@ -5,11 +5,12 @@ from statistics import median
 
 from app.math_utils import american_to_probability, no_vig_probabilities
 from app.models import MarketSnapshot, Side
+from app.identities import normalize_player_name
 
 
 def _player_key(name: str) -> str:
     """Normalize harmless display differences without fuzzy identity matching."""
-    return " ".join(name.split()).casefold()
+    return normalize_player_name(name)
 
 
 def _book_quote(rows: list[MarketSnapshot]) -> dict | None:
