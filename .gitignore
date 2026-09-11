@@ -7,4 +7,5 @@ __pycache__/
 # Reproducible nflverse downloads and derived modeling artifacts. Metadata lives
 # beside these files at runtime; neither bulk data nor manifests are committed.
 data/historical/
+artifacts/benchmarks/
 .cache/nfl-prop-agent/

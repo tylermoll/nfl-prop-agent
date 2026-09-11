@@ -18,7 +18,7 @@ MARKETS = {
     "player_reception_yds": "receiving_yards",
     "player_receptions": "receptions",
 }
-USAGE = ("attempts", "dropbacks", "targets", "receptions", "passing_yards", "receiving_yards", "snap_share", "target_share", "air_yards_share")
+USAGE = ("attempts", "dropbacks", "targets", "receptions", "passing_yards", "receiving_yards", "snap_share", "target_share", "air_yards_share", "team_pass_attempts")
 
 
 def _number(frame: pd.DataFrame, name: str, default: float = 0.0) -> pd.Series:
@@ -92,6 +92,7 @@ def build_modeling_table(weekly: pd.DataFrame, schedules: pd.DataFrame, *, snaps
     joined = joined[(joined.team == joined.home_team) | (joined.team == joined.away_team)].copy()
     joined["opponent"] = np.where(joined.team == joined.home_team, joined.away_team, joined.home_team)
     joined["home_away"] = np.where(joined.team == joined.home_team, "home", "away")
+    joined["is_home"] = (joined["home_away"] == "home").astype(float)
     had_dropbacks = "dropbacks" in joined
     for column in set(MARKETS.values()) | set(USAGE):
         joined[column] = _number(joined, column)

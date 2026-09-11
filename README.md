@@ -11,6 +11,9 @@ V1 goal: validate data quality before building a betting model.
 The separate, leakage-safe historical football feature foundation is
 documented in [`docs/historical-data.md`](docs/historical-data.md). It uses
 cached nflverse releases and contains no odds, recommendations, or wagering.
+The first football-only point-prediction and uncertainty benchmark is described
+in [`docs/football-benchmark.md`](docs/football-benchmark.md); its generated
+models and evaluation tables are written to ignored artifact directories.
 
 ## What V1 does
 1. Pulls NFL event/prop data from odds providers.
