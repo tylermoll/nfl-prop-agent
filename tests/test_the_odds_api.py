@@ -67,8 +67,11 @@ def test_fetches_event_props_and_prioritizes_hard_rock():
     assert rows[0].raw["outcome"]["price"] == -115
     assert rows[0].source_updated_at_utc == datetime(2026, 9, 10, 16, 1, tzinfo=timezone.utc)
     assert provider.usage == {
-        "requests_used": 7, "requests_remaining": 493, "requests_last": 3, "http_requests": 2
+        "requests_used": 7, "requests_remaining": 493, "requests_last": 3,
+        "http_requests": 2, "quota_consumed": 3
     }
+    assert provider.discovered_event_count == 1
+    assert provider.eligible_event_count == 1
 
 
 def test_skips_started_events():
@@ -87,6 +90,59 @@ def test_skips_started_events():
     rows = run(fetch())
     assert rows == []
     assert calls == 1
+
+
+def test_does_not_query_events_outside_default_four_day_window():
+    now = datetime.now(timezone.utc)
+    events = [
+        {"id": "eligible", "commence_time": (now + timedelta(days=3)).isoformat()},
+        {"id": "too-far", "commence_time": (now + timedelta(days=5)).isoformat()},
+        {"id": "unknown", "commence_time": "not-a-date"},
+    ]
+    requested_event_ids = []
+
+    def handler(request: httpx.Request):
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json=events)
+        requested_event_ids.append(request.url.path.split("/")[-2])
+        payload = event_payload()
+        payload["id"] = "eligible"
+        return httpx.Response(200, json=payload)
+
+    async def fetch():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = TheOddsApiProvider("secret", client=client)
+            await provider.fetch_nfl_player_props()
+            return provider
+
+    provider = run(fetch())
+    assert requested_event_ids == ["eligible"]
+    assert provider.discovered_event_count == 3
+    assert provider.eligible_event_count == 1
+    assert provider.usage["http_requests"] == 2
+
+
+def test_lookahead_window_is_configurable():
+    future = (datetime.now(timezone.utc) + timedelta(days=6)).isoformat()
+    paths = []
+
+    def handler(request: httpx.Request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json=[{"id": "day-six", "commence_time": future}])
+        payload = event_payload()
+        payload["id"] = "day-six"
+        return httpx.Response(200, json=payload)
+
+    async def fetch():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = TheOddsApiProvider("secret", client=client, lookahead_days=7)
+            await provider.fetch_nfl_player_props()
+            return provider
+
+    provider = run(fetch())
+    assert any("day-six/odds" in path for path in paths)
+    assert provider.eligible_event_count == 1
 
 
 def test_retries_rate_limit_then_succeeds():

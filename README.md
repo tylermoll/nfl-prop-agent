@@ -43,6 +43,7 @@ Put keys in `.env` locally. Never commit `.env`.
 
 ```env
 THE_ODDS_API_KEY=
+THE_ODDS_API_LOOKAHEAD_DAYS=4
 ODDSPAPI_API_KEY=
 KALSHI_API_KEY_ID=
 KALSHI_PRIVATE_KEY_PATH=
@@ -69,7 +70,11 @@ Run the live, read-only smoke report after injecting the key through your enviro
 DEMO_MODE=false python -m scripts.smoke_the_odds_api
 ```
 
-The JSON report contains upcoming event count, Hard Rock row count, per-market coverage, provider freshness, quota headers, missing markets, and sanitized API errors.
+By default, only events commencing in the next four days are queried for props.
+Set `THE_ODDS_API_LOOKAHEAD_DAYS` to a positive number to adjust that window.
+The JSON report separates all discovered events from eligible events queried and
+contains Hard Rock row count, per-market coverage, provider freshness, HTTP
+request and quota-consumption accounting, missing markets, and sanitized API errors.
 
 ## Codex
 Open this repository in Codex and tell it to read `CODEX.md` first.
