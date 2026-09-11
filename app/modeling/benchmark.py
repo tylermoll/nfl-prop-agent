@@ -392,9 +392,19 @@ def run_benchmark(table: pd.DataFrame, output_dir: str | Path, config: Benchmark
                                   "imputation_indicator_count": int(len(final_model.named_steps["imputer"].indicator_.features_))},
             "residual_source": "validation rows predicted by a model fit on training rows only",
         }
-        joblib.dump({"pipeline": final_model, "additive_bias_correction": bias_correction,
+        # Live inference intentionally uses the uncorrected football prediction:
+        # the receiving-yards additive candidate was a benchmark diagnostic, not
+        # an approved production transform.  Validation-only residuals preserve
+        # independent, prediction-conditional uncertainty provenance.
+        live_edges = np.unique(np.quantile(calibration_prediction, np.linspace(0, 1, 5)))
+        joblib.dump({"pipeline": final_model, "additive_bias_correction": 0.0,
                      "rejected_or_selected_candidate_correction": proposed_bias_correction,
-                     "features": features, "canonical_market": market}, output / f"{market}.joblib")
+                     "features": features, "canonical_market": market,
+                     "calibration_predictions": calibration_prediction,
+                     "calibration_residuals": calibration_residuals,
+                     "prediction_bin_edges": live_edges.tolist(),
+                     "uncertainty_method": "prediction_conditional_empirical_residual_ecdf",
+                     "uncertainty_version": "1"}, output / f"{market}.joblib")
     pd.concat(all_predictions).to_parquet(output / "predictions.parquet", index=False)
     pd.concat(all_intervals).to_parquet(output / "predictive_intervals.parquet", index=False)
     pd.concat(all_calibration_residuals).to_parquet(output / "calibration_residuals.parquet", index=False)

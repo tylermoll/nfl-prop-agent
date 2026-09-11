@@ -14,6 +14,10 @@ cached nflverse releases and contains no odds, recommendations, or wagering.
 The first football-only point-prediction and uncertainty benchmark is described
 in [`docs/football-benchmark.md`](docs/football-benchmark.md); its generated
 models and evaluation tables are written to ignored artifact directories.
+Prospective, immutable paper observations, exact-threshold football scoring,
+settlement, reporting, and explicit market-history limitations are documented
+in [`docs/shadow-evaluation.md`](docs/shadow-evaluation.md). This framework is
+research-only and cannot place a wager or order.
 
 ## What V1 does
 1. Pulls NFL event/prop data from odds providers.
