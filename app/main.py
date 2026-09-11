@@ -6,7 +6,7 @@ from app.providers.the_odds_api import TheOddsApiProvider
 from app.providers.kalshi import KalshiProvider
 from app.services import source_quality, disagreements
 from app.consensus import market_divergences
-from app.cross_market import cross_market_comparisons
+from app.cross_market import cross_market_comparisons, unified_opportunity_scan
 
 app = FastAPI(title="NFL Prop Agent V1")
 
@@ -68,6 +68,17 @@ async def get_cross_market_comparisons():
         rows,
         reference_bookmakers=settings.the_odds_api_reference_bookmakers,
         target_bookmaker=settings.the_odds_api_target_bookmaker,
+    )
+
+@app.get("/unified-opportunities")
+async def get_unified_opportunities():
+    """Read-only descriptive scan; this application has no wagering surface."""
+    rows = await load_rows()
+    return unified_opportunity_scan(
+        rows,
+        reference_bookmakers=settings.the_odds_api_reference_bookmakers,
+        target_bookmaker=settings.the_odds_api_target_bookmaker,
+        min_reference_books=settings.consensus_min_reference_books,
     )
 
 if __name__ == "__main__":
