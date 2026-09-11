@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     kalshi_order_book_shortlist_limit: int = 20
     poll_seconds: int = 60
     stale_after_seconds: int = 180
+    shadow_edge_boundaries_pp: tuple[float, float, float] = (2, 5, 8)
+    shadow_starting_bankroll: float = 100
+    shadow_nominal_unit: float = 10
+    shadow_minimum_report_sample: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
