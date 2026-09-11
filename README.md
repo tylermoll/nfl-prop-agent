@@ -81,20 +81,29 @@ prior report's zero valid Caesars rows means its responses contained no usable
 future runs distinguish book absent, market absent, and malformed outcomes. See
 the [official bookmaker list](https://the-odds-api.com/sports-odds-data/bookmaker-apis.html).
 
-The Kalshi adapter uses Trade API v2 `GET /markets` and
-`GET /markets/{ticker}/orderbook`. These market-data routes are publicly
+The Kalshi adapter uses Trade API v2 `GET /markets` and, optionally,
+`GET /markets/{ticker}/orderbook`. Discovery sends the documented `status`,
+`series_ticker`, `min_close_ts`, and `max_close_ts` filters, once per configured
+NFL series, and has hard page and total-request limits. Kalshi does not document
+a sport/league or player-prop filter, so exact NFL series tickers remain
+configuration rather than being guessed from a universe-wide crawl. These market-data routes are publicly
 readable and need no credential. A Kalshi API key ID and RSA private key are
 needed for authenticated account/trading routes, but are neither needed nor
 used here. Exact supported titles are normalized; ambiguous ones are logged and
-excluded. Raw market and order-book responses are retained.
+excluded. Raw market responses are retained. Because each market response
+already contains YES/NO bid and ask, last price, volume, and open interest,
+order-book depth is disabled by default; when enabled it is requested only for
+the most liquid fully normalized shortlist. Raw order books are then retained.
 `GET /cross-market-comparisons` exposes matched price/liquidity context without
 EV, staking, or action labels. See Kalshi's [official market-data quick
 start](https://docs.kalshi.com/getting_started/quick_start_market_data) and
 [market API reference](https://docs.kalshi.com/api-reference/market/get-markets).
 
 A future live validation has no documented Kalshi per-request dollar/API-credit
-fee: expect one market-list request per page and one order-book request per exact
-supported contract, subject to public rate limits. The Odds API portion remains
+fee: normally expect one market-list request per configured series (plus any
+cursor pages), and zero order-book requests. If depth is enabled, add at most
+`KALSHI_ORDER_BOOK_SHORTLIST_LIMIT` GET requests, while the global request cap
+still applies. The Odds API portion remains
 `3 × E` credits and `1 + E` requests for `E` eligible games.
 
 Run the live, read-only smoke report after injecting the key through your environment's secret manager (never commit it to `.env`):

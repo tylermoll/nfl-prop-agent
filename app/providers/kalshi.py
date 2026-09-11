@@ -1,16 +1,14 @@
-"""Read-only Kalshi market-data adapter.
-
-The public Trade API v2 market and order-book routes are used.  This module
-intentionally contains no trading or order-entry surface.
-"""
+"""Bounded, read-only Kalshi NFL player-prop market-data adapter."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+import time
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -36,44 +34,128 @@ class KalshiApiError(RuntimeError):
     pass
 
 
+@dataclass
+class KalshiDiscoveryStats:
+    market_list_requests: int = 0
+    pages_retrieved: int = 0
+    markets_inspected: int = 0
+    nfl_candidates: int = 0
+    supported_contracts: int = 0
+    order_book_requests: int = 0
+    elapsed_discovery_seconds: float = 0.0
+    errors: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class KalshiProvider(PredictionMarketProvider):
+    """Discover selected NFL series using only public GET routes.
+
+    ``series_tickers`` are exact Kalshi series identifiers. Keeping this list
+    configurable is important because the API has no documented sport or NFL
+    filter and Kalshi may introduce/retire series.
+    """
+
     name = "kalshi"
 
-    def __init__(self, *, client: httpx.AsyncClient | None = None, timeout: float = 20,
-                 max_retries: int = 3, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
+    def __init__(
+        self, *, client: httpx.AsyncClient | None = None, timeout: float = 20,
+        max_retries: int = 3, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        series_tickers: Sequence[str] = ("KXNFL",), lookahead_days: float = 4,
+        max_pages: int = 10, max_requests: int = 25, fetch_order_books: bool = False,
+        order_book_shortlist_limit: int = 20,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ):
+        if not series_tickers or any(not ticker.strip() for ticker in series_tickers):
+            raise ValueError("at least one non-empty Kalshi NFL series ticker is required")
+        if lookahead_days <= 0 or max_pages <= 0 or max_requests <= 0 or order_book_shortlist_limit < 0:
+            raise ValueError("lookahead and safety limits must be positive")
         self._client, self.timeout, self.max_retries, self._sleep = client, timeout, max_retries, sleep
+        self.series_tickers = tuple(dict.fromkeys(ticker.strip() for ticker in series_tickers))
+        self.lookahead_days, self.max_pages, self.max_requests = lookahead_days, max_pages, max_requests
+        self.fetch_order_books, self.order_book_shortlist_limit = fetch_order_books, order_book_shortlist_limit
+        self._now = now
+        self.discovery_stats = KalshiDiscoveryStats()
+        self._requests_made = 0
 
     async def fetch_nfl_player_props(self) -> list[MarketSnapshot]:
         owns = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        self.discovery_stats, self._requests_made = KalshiDiscoveryStats(), 0
+        started = time.monotonic()
+        start = self._now().astimezone(timezone.utc)
+        end = start + timedelta(days=self.lookahead_days)
+        rows: list[MarketSnapshot] = []
         try:
-            rows, cursor = [], None
-            while True:
-                params = {"status": "open", "limit": "1000"}
-                if cursor:
-                    params["cursor"] = cursor
-                payload = await self._get_json(client, "/markets", params)
-                markets = payload.get("markets") if isinstance(payload, dict) else None
-                if not isinstance(markets, list):
-                    raise KalshiApiError("Kalshi markets response lacks a markets array")
-                observed = datetime.now(timezone.utc)
-                for market in markets:
-                    parsed = normalize_kalshi_market(market, observed)
-                    if parsed is None:
-                        continue
-                    book = await self._get_json(client, f"/markets/{parsed.source_market_id}/orderbook", {"depth": "100"})
+            stop = False
+            for series in self.series_tickers:
+                cursor: str | None = None
+                while not stop and self.discovery_stats.pages_retrieved < self.max_pages:
+                    if self._requests_made >= self.max_requests:
+                        stop = True
+                        break
+                    params = {
+                        "status": "open", "limit": "1000", "series_ticker": series,
+                        "min_close_ts": str(int(start.timestamp())),
+                        "max_close_ts": str(int(end.timestamp())),
+                    }
+                    if cursor:
+                        params["cursor"] = cursor
+                    payload = await self._get_json(client, "/markets", params, "market_list")
+                    markets = payload.get("markets") if isinstance(payload, dict) else None
+                    if not isinstance(markets, list):
+                        raise KalshiApiError("Kalshi markets response lacks a markets array")
+                    self.discovery_stats.pages_retrieved += 1
+                    observed = self._now().astimezone(timezone.utc)
+                    for market in markets:
+                        self.discovery_stats.markets_inspected += 1
+                        if not _is_nfl_market(market):
+                            continue
+                        self.discovery_stats.nfl_candidates += 1
+                        if not _within_close_window(market, start, end):
+                            continue
+                        parsed = normalize_kalshi_market(market, observed)
+                        if parsed is not None:
+                            rows.append(parsed)
+                            self.discovery_stats.supported_contracts += 1
+                    cursor = payload.get("cursor")
+                    if not isinstance(cursor, str) or not cursor:
+                        break
+                if self.discovery_stats.pages_retrieved >= self.max_pages:
+                    stop = True
+
+            # List responses already contain top-of-book prices, last price,
+            # volume and open interest. Depth is fetched only for the most
+            # liquid fully validated contracts when explicitly requested.
+            if self.fetch_order_books:
+                shortlist = sorted(rows, key=_liquidity_rank, reverse=True)[:self.order_book_shortlist_limit]
+                for parsed in shortlist:
+                    if self._requests_made >= self.max_requests:
+                        break
+                    book = await self._get_json(
+                        client, f"/markets/{parsed.source_market_id}/orderbook", {"depth": "100"}, "order_book"
+                    )
                     parsed.order_book_depth = book.get("orderbook") if isinstance(book, dict) else None
                     parsed.raw["orderbook_response"] = book
-                    rows.append(parsed)
-                cursor = payload.get("cursor")
-                if not isinstance(cursor, str) or not cursor:
-                    return rows
+            return rows
+        except KalshiApiError as exc:
+            self.discovery_stats.errors.append(str(exc))
+            raise
         finally:
+            self.discovery_stats.elapsed_discovery_seconds = time.monotonic() - started
             if owns:
                 await client.aclose()
 
-    async def _get_json(self, client: httpx.AsyncClient, path: str, params: dict[str, str]) -> Any:
+    async def _get_json(self, client: httpx.AsyncClient, path: str, params: dict[str, str], kind: str) -> Any:
         for attempt in range(self.max_retries + 1):
+            if self._requests_made >= self.max_requests:
+                raise KalshiApiError("Kalshi discovery request safety limit reached")
+            self._requests_made += 1
+            if kind == "market_list":
+                self.discovery_stats.market_list_requests += 1
+            else:
+                self.discovery_stats.order_book_requests += 1
             try:
                 response = await client.get(f"{BASE_URL}{path}", params=params)
                 if response.status_code == 429 or response.status_code >= 500:
@@ -95,12 +177,30 @@ class KalshiProvider(PredictionMarketProvider):
         raise AssertionError("retry loop exited")
 
 
+def _is_nfl_market(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    identifiers = " ".join(str(raw.get(k, "")) for k in ("ticker", "event_ticker", "series_ticker"))
+    return "NFL" in identifiers.upper()
+
+
+def _within_close_window(raw: Any, start: datetime, end: datetime) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    close = _parse_datetime(raw.get("close_time") or raw.get("close_ts"))
+    # The server bounds are authoritative when old payloads omit close time.
+    return close is None or start <= close <= end
+
+
+def _liquidity_rank(row: MarketSnapshot) -> tuple[float, float]:
+    return row.volume or 0.0, row.open_interest or 0.0
+
+
 def normalize_kalshi_market(raw: Any, observed: datetime) -> MarketSnapshot | None:
     if not isinstance(raw, dict) or not isinstance(raw.get("ticker"), str):
         logger.warning("Skipping malformed Kalshi market")
         return None
-    identifiers = " ".join(str(raw.get(k, "")) for k in ("ticker", "event_ticker", "series_ticker"))
-    if "NFL" not in identifiers.upper():
+    if not _is_nfl_market(raw):
         return None
     title, subtitle = str(raw.get("title", "")).strip(), str(raw.get("subtitle", "")).strip()
     texts = {value for value in (title, subtitle, str(raw.get("yes_sub_title", "")).strip(),
@@ -112,8 +212,10 @@ def normalize_kalshi_market(raw: Any, observed: datetime) -> MarketSnapshot | No
         return None
     match = matches[0]
     player = " ".join(match.group("player").split())
+    if len(player.split()) < 2 or {part.casefold() for part in player.split()} & {"team", "total"}:
+        logger.warning("Excluding ambiguous Kalshi market %s: player identity is not explicit", raw["ticker"])
+        return None
     threshold = float(match.group("threshold"))
-    # Kalshi's X+ YES contracts correspond to sportsbook Over X-0.5.
     line = threshold - 0.5 if "." not in match.group("threshold") else threshold
     yes_bid, yes_ask = _price(raw, "yes_bid"), _price(raw, "yes_ask")
     midpoint = (yes_bid + yes_ask) / 2 if yes_bid is not None and yes_ask is not None else None
