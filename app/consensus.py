@@ -3,7 +3,7 @@
 from collections import defaultdict
 from statistics import median
 
-from app.math_utils import american_to_probability
+from app.math_utils import american_to_probability, no_vig_probabilities
 from app.models import MarketSnapshot, Side
 
 
@@ -31,12 +31,20 @@ def _book_quote(rows: list[MarketSnapshot]) -> dict | None:
         )
     if prices["over"] is None and prices["under"] is None:
         return None
+    no_vig = (no_vig_probabilities(prices["over"], prices["under"])
+              if prices["over"] is not None and prices["under"] is not None else (None, None))
+    updated = [r.source_updated_at_utc for r in rows if r.source_updated_at_utc]
+    observed = [r.observed_at_utc for r in rows]
     return {
         "line": next(iter(lines)),
         "over_odds": prices["over"],
         "under_odds": prices["under"],
         "over_implied_probability": probabilities["over"],
         "under_implied_probability": probabilities["under"],
+        "over_no_vig_probability": no_vig[0],
+        "under_no_vig_probability": no_vig[1],
+        "source_updated_at_utc": max(updated).isoformat() if updated else None,
+        "observed_at_utc": max(observed).isoformat() if observed else None,
     }
 
 
@@ -72,10 +80,14 @@ def market_divergences(
         }
         if len(reference_quotes) < min_reference_books:
             continue
-        reference_median = float(median(q["line"] for q in reference_quotes.values()))
+        reference_lines = [q["line"] for q in reference_quotes.values()]
+        reference_median = float(median(reference_lines))
         difference = float(target["line"] - reference_median)
         report.append({
             "game_id": key[0],
+            "game": next((r.event_name for r in items if r.event_name), key[0]),
+            "home_team": next((r.home_team for r in items if r.home_team), None),
+            "away_team": next((r.away_team for r in items if r.away_team), None),
             "player": display_names[key],
             "market": key[2],
             "hard_rock_line": target["line"],
@@ -83,13 +95,21 @@ def market_divergences(
             "hard_rock_under_odds": target["under_odds"],
             "hard_rock_over_implied_probability": target["over_implied_probability"],
             "hard_rock_under_implied_probability": target["under_implied_probability"],
+            "hard_rock_over_no_vig_probability": target["over_no_vig_probability"],
+            "hard_rock_under_no_vig_probability": target["under_no_vig_probability"],
+            "hard_rock_source_updated_at_utc": target["source_updated_at_utc"],
+            "hard_rock_observed_at_utc": target["observed_at_utc"],
             "reference_books": reference_quotes,
             "median_reference_line": reference_median,
+            "min_reference_line": min(reference_lines),
+            "max_reference_line": max(reference_lines),
+            "reference_line_range": max(reference_lines) - min(reference_lines),
             "reference_book_count": len(reference_quotes),
             "hard_rock_line_difference": difference,
             "consensus_direction": (
                 "higher" if difference > 0 else "lower" if difference < 0 else "same"
             ),
+            "comparison": _side_comparison(target, reference_quotes, reference_median),
         })
     return sorted(
         report,
@@ -100,3 +120,22 @@ def market_divergences(
             item["market"],
         ),
     )
+
+
+def _side_comparison(target: dict, references: dict[str, dict], line: float) -> dict:
+    """Separate line value from price value; never infer expected value."""
+    same_line = [q for q in references.values() if q["line"] == target["line"]]
+    result = {}
+    for side in ("over", "under"):
+        target_odds = target[f"{side}_odds"]
+        odds = [q[f"{side}_odds"] for q in same_line if q[f"{side}_odds"] is not None]
+        reference_odds = float(median(odds)) if odds else None
+        better_line = target["line"] < line if side == "over" else target["line"] > line
+        result[side] = {
+            "better_line": better_line,
+            "same_line_price_comparable": bool(odds) and target_odds is not None,
+            "median_same_line_reference_odds": reference_odds,
+            "better_price": (target_odds > reference_odds
+                             if reference_odds is not None and target_odds is not None else None),
+        }
+    return result
