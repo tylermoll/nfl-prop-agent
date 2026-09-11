@@ -69,3 +69,14 @@ def test_report_is_ranked_by_absolute_divergence_and_contains_no_actions():
 def test_invalid_minimum_coverage_is_rejected():
     with pytest.raises(ValueError, match="at least one"):
         market_divergences([], reference_bookmakers=REFERENCES, min_reference_books=0)
+
+def test_dispersion_no_vig_freshness_and_same_line_price_are_separate():
+    rows = quote("hardrockbet", 80.5, -105, -115)
+    rows += quote("draftkings", 80.5, -110, -110)
+    rows += quote("fanduel", 82.5, -120, 100)
+    item = market_divergences(rows, reference_bookmakers=REFERENCES)[0]
+    assert (item["min_reference_line"], item["max_reference_line"], item["reference_line_range"]) == (80.5, 82.5, 2)
+    assert item["reference_books"]["draftkings"]["over_no_vig_probability"] == pytest.approx(.5)
+    assert item["comparison"]["over"]["better_price"] is True
+    assert item["comparison"]["over"]["better_line"] is True
+    assert item["hard_rock_observed_at_utc"] == "2026-01-01T00:00:00+00:00"

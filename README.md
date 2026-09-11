@@ -67,6 +67,36 @@ quota headers; it retries rate limits and transient provider failures. See the
 
 This integration only reads market data. It does not submit wagers.
 
+## Price-aware consensus and Kalshi
+
+`GET /divergences` keeps prices, vig-inclusive and no-vig probabilities,
+freshness, named matchups, reference min/max/median/range, and distinct
+same-line `better_price` and `better_line` fields. It makes no EV claim.
+
+The Odds API's official bookmaker table identifies Caesars with provider key
+`williamhill_us`; the key is not silently replaced. An explicitly requested
+book can be absent when it offers none of the requested event-level props. The
+prior report's zero valid Caesars rows means its responses contained no usable
+`williamhill_us` outcomes, not that the normalizer aliased it. Raw responses let
+future runs distinguish book absent, market absent, and malformed outcomes. See
+the [official bookmaker list](https://the-odds-api.com/sports-odds-data/bookmaker-apis.html).
+
+The Kalshi adapter uses Trade API v2 `GET /markets` and
+`GET /markets/{ticker}/orderbook`. These market-data routes are publicly
+readable and need no credential. A Kalshi API key ID and RSA private key are
+needed for authenticated account/trading routes, but are neither needed nor
+used here. Exact supported titles are normalized; ambiguous ones are logged and
+excluded. Raw market and order-book responses are retained.
+`GET /cross-market-comparisons` exposes matched price/liquidity context without
+EV, staking, or action labels. See Kalshi's [official market-data quick
+start](https://docs.kalshi.com/getting_started/quick_start_market_data) and
+[market API reference](https://docs.kalshi.com/api-reference/market/get-markets).
+
+A future live validation has no documented Kalshi per-request dollar/API-credit
+fee: expect one market-list request per page and one order-book request per exact
+supported contract, subject to public rate limits. The Odds API portion remains
+`3 × E` credits and `1 + E` requests for `E` eligible games.
+
 Run the live, read-only smoke report after injecting the key through your environment's secret manager (never commit it to `.env`):
 
 ```bash

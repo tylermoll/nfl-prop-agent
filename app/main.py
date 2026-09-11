@@ -3,14 +3,20 @@ from fastapi import FastAPI
 from app.config import settings
 from app.providers.demo import DemoOddsProvider, DemoKalshiProvider
 from app.providers.the_odds_api import TheOddsApiProvider
+from app.providers.kalshi import KalshiProvider
 from app.services import source_quality, disagreements
 from app.consensus import market_divergences
+from app.cross_market import cross_market_comparisons
 
 app = FastAPI(title="NFL Prop Agent V1")
 
 async def load_rows():
     if not settings.demo_mode:
-        return await TheOddsApiProvider().fetch_nfl_player_props()
+        odds, kalshi = await asyncio.gather(
+            TheOddsApiProvider().fetch_nfl_player_props(),
+            KalshiProvider().fetch_nfl_player_props(),
+        )
+        return odds + kalshi
     odds = DemoOddsProvider()
     kalshi = DemoKalshiProvider()
     a, b = await asyncio.gather(
@@ -46,6 +52,15 @@ async def get_divergences():
         reference_bookmakers=settings.the_odds_api_reference_bookmakers,
         target_bookmaker=settings.the_odds_api_target_bookmaker,
         min_reference_books=settings.consensus_min_reference_books,
+    )
+
+@app.get("/cross-market-comparisons")
+async def get_cross_market_comparisons():
+    rows = await load_rows()
+    return cross_market_comparisons(
+        rows,
+        reference_bookmakers=settings.the_odds_api_reference_bookmakers,
+        target_bookmaker=settings.the_odds_api_target_bookmaker,
     )
 
 if __name__ == "__main__":

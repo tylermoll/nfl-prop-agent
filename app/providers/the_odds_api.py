@@ -260,6 +260,9 @@ class TheOddsApiProvider(OddsProvider):
             source=book_key,
             source_market_id=f"{event_id}:{book_key}:{market_key}:{player}",
             game_id=event_id,
+            event_name=_event_name(raw_response),
+            home_team=raw_response.get("home_team"),
+            away_team=raw_response.get("away_team"),
             player_name=player,
             market_type=MARKET_MAP[market_key],
             line=float(point),
@@ -274,6 +277,11 @@ class TheOddsApiProvider(OddsProvider):
                 "outcome": outcome,
             },
         )
+
+
+def _event_name(payload: dict[str, Any]) -> str | None:
+    away, home = payload.get("away_team"), payload.get("home_team")
+    return f"{away} at {home}" if isinstance(away, str) and isinstance(home, str) else None
 
 
 def _parse_datetime(value: Any) -> datetime | None:
