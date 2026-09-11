@@ -24,6 +24,11 @@ STAT_MAP = {
     "receiving yards": MarketType.RECEPTION_YDS,
     "receptions": MarketType.RECEPTIONS,
 }
+SERIES_TITLE_MAP = {
+    "Pro Football Passing Yards": MarketType.PASS_YDS,
+    "Pro Football Receiving Yards": MarketType.RECEPTION_YDS,
+    "Pro Football Player Receptions": MarketType.RECEPTIONS,
+}
 PATTERNS = (
     re.compile(r"^(?P<player>[A-Za-z][A-Za-z .'-]+?)\s*[:|-]\s*(?P<threshold>\d+(?:\.\d+)?)\+?\s+(?P<stat>passing yards|receiving yards|receptions)$", re.I),
     re.compile(r"^Will (?P<player>[A-Za-z][A-Za-z .'-]+?) (?:have|record|get) (?P<threshold>\d+(?:\.\d+)?)\+? (?P<stat>passing yards|receiving yards|receptions)(?:\?)?$", re.I),
@@ -36,11 +41,13 @@ class KalshiApiError(RuntimeError):
 
 @dataclass
 class KalshiDiscoveryStats:
+    series_list_requests: int = 0
     market_list_requests: int = 0
     pages_retrieved: int = 0
     markets_inspected: int = 0
     nfl_candidates: int = 0
     supported_contracts: int = 0
+    discovered_series: dict[str, str] = field(default_factory=dict)
     order_book_requests: int = 0
     elapsed_discovery_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
@@ -52,9 +59,9 @@ class KalshiDiscoveryStats:
 class KalshiProvider(PredictionMarketProvider):
     """Discover selected NFL series using only public GET routes.
 
-    ``series_tickers`` are exact Kalshi series identifiers. Keeping this list
-    configurable is important because the API has no documented sport or NFL
-    filter and Kalshi may introduce/retire series.
+    The public series catalog is filtered by Kalshi's Football tag and matched
+    to exact supported series titles and an NFL settlement source. An optional
+    ``series_tickers`` allowlist can further restrict the discovered result.
     """
 
     name = "kalshi"
@@ -62,13 +69,13 @@ class KalshiProvider(PredictionMarketProvider):
     def __init__(
         self, *, client: httpx.AsyncClient | None = None, timeout: float = 20,
         max_retries: int = 3, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        series_tickers: Sequence[str] = ("KXNFL",), lookahead_days: float = 4,
+        series_tickers: Sequence[str] = (), lookahead_days: float = 4,
         max_pages: int = 10, max_requests: int = 25, fetch_order_books: bool = False,
         order_book_shortlist_limit: int = 20,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
-        if not series_tickers or any(not ticker.strip() for ticker in series_tickers):
-            raise ValueError("at least one non-empty Kalshi NFL series ticker is required")
+        if any(not ticker.strip() for ticker in series_tickers):
+            raise ValueError("configured Kalshi NFL series tickers must be non-empty")
         if lookahead_days <= 0 or max_pages <= 0 or max_requests <= 0 or order_book_shortlist_limit < 0:
             raise ValueError("lookahead and safety limits must be positive")
         self._client, self.timeout, self.max_retries, self._sleep = client, timeout, max_retries, sleep
@@ -88,8 +95,18 @@ class KalshiProvider(PredictionMarketProvider):
         end = start + timedelta(days=self.lookahead_days)
         rows: list[MarketSnapshot] = []
         try:
+            catalog = await self._get_json(
+                client, "/series", {"category": "Sports", "tags": "Football"}, "series_list"
+            )
+            discovered = discover_nfl_player_prop_series(catalog)
+            if self.series_tickers:
+                allowed = set(self.series_tickers)
+                discovered = {ticker: kind for ticker, kind in discovered.items() if ticker in allowed}
+            self.discovery_stats.discovered_series = {
+                ticker: market_type.value for ticker, market_type in discovered.items()
+            }
             stop = False
-            for series in self.series_tickers:
+            for series in discovered:
                 cursor: str | None = None
                 while not stop and self.discovery_stats.pages_retrieved < self.max_pages:
                     if self._requests_made >= self.max_requests:
@@ -152,7 +169,9 @@ class KalshiProvider(PredictionMarketProvider):
             if self._requests_made >= self.max_requests:
                 raise KalshiApiError("Kalshi discovery request safety limit reached")
             self._requests_made += 1
-            if kind == "market_list":
+            if kind == "series_list":
+                self.discovery_stats.series_list_requests += 1
+            elif kind == "market_list":
                 self.discovery_stats.market_list_requests += 1
             else:
                 self.discovery_stats.order_book_requests += 1
@@ -175,6 +194,34 @@ class KalshiProvider(PredictionMarketProvider):
                     raise KalshiApiError(f"Kalshi request failed for {path}") from exc
                 await self._sleep(0.5 * 2**attempt)
         raise AssertionError("retry loop exited")
+
+
+def discover_nfl_player_prop_series(payload: Any) -> dict[str, MarketType]:
+    """Select only exact, documented NFL single-player stat series metadata."""
+    series = payload.get("series") if isinstance(payload, dict) else None
+    if not isinstance(series, list):
+        raise KalshiApiError("Kalshi series response lacks a series array")
+    discovered: dict[str, MarketType] = {}
+    for item in series:
+        if not isinstance(item, dict):
+            continue
+        ticker, title = item.get("ticker"), item.get("title")
+        tags = item.get("tags")
+        sources = item.get("settlement_sources")
+        nfl_source = isinstance(sources, list) and any(
+            isinstance(source, dict) and "nfl.com" in str(source.get("url", "")).casefold()
+            for source in sources
+        )
+        if (
+            isinstance(ticker, str)
+            and title in SERIES_TITLE_MAP
+            and item.get("category") == "Sports"
+            and isinstance(tags, list)
+            and "Football" in tags
+            and nfl_source
+        ):
+            discovered[ticker] = SERIES_TITLE_MAP[title]
+    return discovered
 
 
 def _is_nfl_market(raw: Any) -> bool:

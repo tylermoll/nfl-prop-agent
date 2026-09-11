@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     oddspapi_api_key: str | None = None
     kalshi_api_key_id: str | None = None
     kalshi_private_key_path: str | None = None
-    kalshi_nfl_series_tickers: tuple[str, ...] = ("KXNFL",)
+    # Empty means discover the exact NFL prop series from Kalshi's public
+    # Football-tagged series catalog. Set a JSON list to use it as an allowlist.
+    kalshi_nfl_series_tickers: tuple[str, ...] = ()
     kalshi_lookahead_days: float = 4
     kalshi_max_pages: int = 10
     kalshi_max_requests: int = 25

@@ -81,13 +81,30 @@ prior report's zero valid Caesars rows means its responses contained no usable
 future runs distinguish book absent, market absent, and malformed outcomes. See
 the [official bookmaker list](https://the-odds-api.com/sports-odds-data/bookmaker-apis.html).
 
-The Kalshi adapter uses Trade API v2 `GET /markets` and, optionally,
-`GET /markets/{ticker}/orderbook`. Discovery sends the documented `status`,
-`series_ticker`, `min_close_ts`, and `max_close_ts` filters, once per configured
-NFL series, and has hard page and total-request limits. Kalshi does not document
-a sport/league or player-prop filter, so exact NFL series tickers remain
-configuration rather than being guessed from a universe-wide crawl. These market-data routes are publicly
-readable and need no credential. A Kalshi API key ID and RSA private key are
+The Kalshi adapter first uses the public Trade API v2 `GET /series` catalog with
+the documented `category=Sports&tags=Football` metadata filters. It accepts only
+an exact supported series title whose metadata is tagged Football and names
+`nfl.com` as a settlement source. This currently discovers these player-game
+series (rather than the generic game-winner series `KXNFL`):
+
+| Kalshi series | Canonical market |
+| --- | --- |
+| `KXNFLPASSYDS` | `player_pass_yds` |
+| `KXNFLRECYDS` | `player_reception_yds` |
+| `KXNFLREC` | `player_receptions` |
+
+The empty default `KALSHI_NFL_SERIES_TICKERS=[]` enables catalog discovery; a
+configured JSON list acts as an allowlist of those validated catalog results,
+not as trusted or guessed identifiers. The adapter then uses `GET /markets`
+with the documented `status`, `series_ticker`, `min_close_ts`, and
+`max_close_ts` filters once per discovered series. Discovery has hard page and
+total-request limits and does not crawl unrelated markets. Kalshi also exposes
+`GET /search/filters_by_sport` (whose Football / Pro Football scopes include
+Passing Yards, Receiving Yards, and Receptions) and `GET /events` with
+`series_ticker` and `with_nested_markets`; these are useful for inspecting the
+sport/event hierarchy, while the series catalog plus tightly filtered markets
+route is smaller for routine normalization. These market-data routes are
+publicly readable and need no credential. A Kalshi API key ID and RSA private key are
 needed for authenticated account/trading routes, but are neither needed nor
 used here. Exact supported titles are normalized; ambiguous ones are logged and
 excluded. Raw market responses are retained. Because each market response
@@ -103,7 +120,9 @@ A future live validation has no documented Kalshi per-request dollar/API-credit
 fee: normally expect one market-list request per configured series (plus any
 cursor pages), and zero order-book requests. If depth is enabled, add at most
 `KALSHI_ORDER_BOOK_SHORTLIST_LIMIT` GET requests, while the global request cap
-still applies. The Odds API portion remains
+still applies. A normal Kalshi run therefore starts with one series-list request
+and then makes one market-list request per discovered series (plus bounded
+cursor pages). The Odds API portion remains
 `3 × E` credits and `1 + E` requests for `E` eligible games.
 
 Run the live, read-only smoke report after injecting the key through your environment's secret manager (never commit it to `.env`):
