@@ -54,7 +54,7 @@ def test_fetches_event_props_and_prioritizes_hard_rock():
 
     async def fetch():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            provider = TheOddsApiProvider("secret", client=client)
+            provider = TheOddsApiProvider("secret", bookmakers=("hardrockbet",), client=client)
             return await provider.fetch_nfl_player_props(), provider
 
     rows, provider = run(fetch())
@@ -72,6 +72,30 @@ def test_fetches_event_props_and_prioritizes_hard_rock():
     }
     assert provider.discovered_event_count == 1
     assert provider.eligible_event_count == 1
+
+
+def test_default_request_combines_target_and_reference_books_once():
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    odds_requests = []
+
+    def handler(request: httpx.Request):
+        assert request.method == "GET"
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json=[{"id": "event-1", "commence_time": future}])
+        odds_requests.append(request)
+        return httpx.Response(200, json=event_payload())
+
+    async def fetch():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await TheOddsApiProvider("secret", client=client).fetch_nfl_player_props()
+
+    run(fetch())
+    assert len(odds_requests) == 1
+    assert set(odds_requests[0].url.params["bookmakers"].split(",")) == {
+        "hardrockbet", "draftkings", "fanduel", "betmgm", "williamhill_us"
+    }
+    assert not hasattr(TheOddsApiProvider, "place_wager")
+    assert not hasattr(TheOddsApiProvider, "place_order")
 
 
 def test_skips_started_events():

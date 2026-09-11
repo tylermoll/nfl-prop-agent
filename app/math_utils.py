@@ -1,4 +1,7 @@
 def american_to_probability(odds: int) -> float:
+    """Convert raw American odds to their vig-inclusive implied probability."""
+    if not isinstance(odds, int) or isinstance(odds, bool):
+        raise TypeError("American odds must be an integer")
     if odds == 0:
         raise ValueError("American odds cannot be zero")
     if odds < 0:

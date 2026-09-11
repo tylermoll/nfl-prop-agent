@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from pydantic import BaseModel, Field
+from app.math_utils import american_to_probability
 
 class MarketType(str, Enum):
     PASS_YDS = "player_pass_yds"
@@ -34,7 +35,4 @@ class MarketSnapshot(BaseModel):
             return self.contract_price
         if self.american_odds is None:
             return None
-        o = self.american_odds
-        if o < 0:
-            return abs(o) / (abs(o) + 100)
-        return 100 / (o + 100)
+        return american_to_probability(self.american_odds)

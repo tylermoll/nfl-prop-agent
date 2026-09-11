@@ -1,10 +1,17 @@
 from app.math_utils import american_to_probability, no_vig_probabilities
+import pytest
 
 def test_american_negative():
     assert round(american_to_probability(-110), 4) == 0.5238
 
 def test_american_positive():
     assert round(american_to_probability(150), 4) == 0.4
+
+def test_american_zero_and_non_integer_are_rejected():
+    with pytest.raises(ValueError):
+        american_to_probability(0)
+    with pytest.raises(TypeError):
+        american_to_probability("-110")
 
 def test_no_vig_sums_to_one():
     over, under = no_vig_probabilities(-110, -110)

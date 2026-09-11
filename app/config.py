@@ -5,6 +5,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/prop_agent"
     the_odds_api_key: str | None = None
     the_odds_api_lookahead_days: float = 4
+    the_odds_api_reference_bookmakers: tuple[str, ...] = (
+        "draftkings",
+        "fanduel",
+        "betmgm",
+        "williamhill_us",
+    )
+    the_odds_api_target_bookmaker: str = "hardrockbet"
+    consensus_min_reference_books: int = 2
     oddspapi_api_key: str | None = None
     kalshi_api_key_id: str | None = None
     kalshi_private_key_path: str | None = None
