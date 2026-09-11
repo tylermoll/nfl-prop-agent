@@ -8,6 +8,10 @@ A recommendation-only NFL player-prop research system focused on:
 
 V1 goal: validate data quality before building a betting model.
 
+The separate, leakage-safe historical football feature foundation is
+documented in [`docs/historical-data.md`](docs/historical-data.md). It uses
+cached nflverse releases and contains no odds, recommendations, or wagering.
+
 ## What V1 does
 1. Pulls NFL event/prop data from odds providers.
 2. Pulls Kalshi market/trade/order-book data through an adapter.
