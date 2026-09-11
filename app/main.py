@@ -14,7 +14,14 @@ async def load_rows():
     if not settings.demo_mode:
         odds, kalshi = await asyncio.gather(
             TheOddsApiProvider().fetch_nfl_player_props(),
-            KalshiProvider().fetch_nfl_player_props(),
+            KalshiProvider(
+                series_tickers=settings.kalshi_nfl_series_tickers,
+                lookahead_days=settings.kalshi_lookahead_days,
+                max_pages=settings.kalshi_max_pages,
+                max_requests=settings.kalshi_max_requests,
+                fetch_order_books=settings.kalshi_fetch_order_books,
+                order_book_shortlist_limit=settings.kalshi_order_book_shortlist_limit,
+            ).fetch_nfl_player_props(),
         )
         return odds + kalshi
     odds = DemoOddsProvider()

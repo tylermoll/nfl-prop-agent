@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     oddspapi_api_key: str | None = None
     kalshi_api_key_id: str | None = None
     kalshi_private_key_path: str | None = None
+    kalshi_nfl_series_tickers: tuple[str, ...] = ("KXNFL",)
+    kalshi_lookahead_days: float = 4
+    kalshi_max_pages: int = 10
+    kalshi_max_requests: int = 25
+    kalshi_fetch_order_books: bool = False
+    kalshi_order_book_shortlist_limit: int = 20
     poll_seconds: int = 60
     stale_after_seconds: int = 180
 
