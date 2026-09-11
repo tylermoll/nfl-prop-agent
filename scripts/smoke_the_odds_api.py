@@ -31,7 +31,8 @@ async def smoke() -> tuple[dict, int]:
         return {
             "ok": False,
             "error": str(exc),
-            "upcoming_nfl_events": provider.upcoming_event_count,
+            "discovered_nfl_events": provider.discovered_event_count,
+            "eligible_nfl_events_queried": provider.eligible_event_count,
             "quota": provider.usage,
         }, 1
 
@@ -57,7 +58,8 @@ async def smoke() -> tuple[dict, int]:
     }
     return {
         "ok": True,
-        "upcoming_nfl_events": provider.upcoming_event_count,
+        "discovered_nfl_events": provider.discovered_event_count,
+        "eligible_nfl_events_queried": provider.eligible_event_count,
         "hardrockbet_present": bool(hard_rock_rows),
         "hardrockbet_player_prop_rows": len(hard_rock_rows),
         "hardrockbet_market_counts": counts,

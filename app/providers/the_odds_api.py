@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -54,6 +54,7 @@ class TheOddsApiProvider(OddsProvider):
         bookmakers: tuple[str, ...] = ("hardrockbet",),
         timeout: float = 20,
         max_retries: int = 3,
+        lookahead_days: float | None = None,
         client: httpx.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -61,6 +62,13 @@ class TheOddsApiProvider(OddsProvider):
         self.bookmakers = bookmakers
         self.timeout = timeout
         self.max_retries = max_retries
+        self.lookahead_days = (
+            settings.the_odds_api_lookahead_days
+            if lookahead_days is None
+            else lookahead_days
+        )
+        if self.lookahead_days <= 0:
+            raise ValueError("lookahead_days must be greater than zero")
         self._client = client
         self._sleep = sleep
         self.usage: dict[str, int | None] = {
@@ -68,8 +76,10 @@ class TheOddsApiProvider(OddsProvider):
             "requests_remaining": None,
             "requests_last": None,
             "http_requests": 0,
+            "quota_consumed": 0,
         }
-        self.upcoming_event_count = 0
+        self.discovered_event_count = 0
+        self.eligible_event_count = 0
 
     async def fetch_nfl_player_props(self) -> list[MarketSnapshot]:
         if not self.api_key:
@@ -86,18 +96,22 @@ class TheOddsApiProvider(OddsProvider):
 
             rows: list[MarketSnapshot] = []
             now = datetime.now(timezone.utc)
-            upcoming_events: list[dict[str, Any]] = []
+            self.discovered_event_count = len(events)
+            window_end = now + timedelta(days=self.lookahead_days)
+            eligible_events: list[dict[str, Any]] = []
             for event in events:
                 event_id = event.get("id") if isinstance(event, dict) else None
                 if not isinstance(event_id, str) or not event_id:
                     logger.warning("Skipping The Odds API event without a valid id")
                     continue
                 commence = _parse_datetime(event.get("commence_time"))
-                if commence is not None and commence < now:
+                # A missing timestamp cannot establish that an event is in the
+                # configured window, so fail closed rather than spend quota.
+                if commence is None or commence < now or commence > window_end:
                     continue
-                upcoming_events.append(event)
-            self.upcoming_event_count = len(upcoming_events)
-            for event in upcoming_events:
+                eligible_events.append(event)
+            self.eligible_event_count = len(eligible_events)
+            for event in eligible_events:
                 event_id = event["id"]
                 payload = await self._get_json(
                     client,
@@ -154,6 +168,13 @@ class TheOddsApiProvider(OddsProvider):
                     self.usage[header.removeprefix("x-").replace("-", "_")] = int(value)
                 except ValueError:
                     logger.warning("Ignoring malformed quota header %s=%r", header, value)
+        last = headers.get("x-requests-last")
+        if last is not None:
+            try:
+                self.usage["quota_consumed"] = int(self.usage["quota_consumed"] or 0) + int(last)
+            except ValueError:
+                # The malformed value was already reported by the loop above.
+                pass
 
     def _normalize_event(
         self, payload: Any, observed_at: datetime
