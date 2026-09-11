@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from app.models import MarketSnapshot, MarketType, Side
+from app.identities import teams_from_event_label, teams_from_kalshi_ticker
 from app.providers.base import PredictionMarketProvider
 from app.providers.the_odds_api import _parse_datetime
 
@@ -267,9 +268,13 @@ def normalize_kalshi_market(raw: Any, observed: datetime) -> MarketSnapshot | No
     yes_bid, yes_ask = _price(raw, "yes_bid"), _price(raw, "yes_ask")
     midpoint = (yes_bid + yes_ask) / 2 if yes_bid is not None and yes_ask is not None else None
     event = raw.get("event_ticker") or raw.get("series_ticker") or raw["ticker"]
+    event_name = next((raw.get(field) for field in ("event_title", "event_subtitle")
+                       if isinstance(raw.get(field), str) and raw.get(field).strip()), None)
+    teams = teams_from_event_label(event_name) or teams_from_kalshi_ticker(str(event))
     return MarketSnapshot(
         source="kalshi", source_market_id=raw["ticker"], game_id=str(event),
-        event_name=raw.get("event_title"), player_name=player,
+        event_name=event_name, away_team=teams[0] if teams else None,
+        home_team=teams[1] if teams else None, player_name=player,
         market_type=STAT_MAP[match.group("stat").casefold()], line=line, side=Side.YES,
         contract_price=midpoint, yes_bid=yes_bid, yes_ask=yes_ask,
         no_bid=_price(raw, "no_bid"), no_ask=_price(raw, "no_ask"),

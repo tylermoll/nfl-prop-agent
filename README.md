@@ -73,11 +73,21 @@ This integration only reads market data. It does not submit wagers.
 
 `GET /unified-opportunities` performs one read-only load of the existing Hard
 Rock/reference sportsbook and Kalshi adapters, then builds a deterministic
-report. It groups on an exactly normalized event label, whitespace/case-only
-player identity, canonical market, and numeric threshold. Provider-native game
-IDs are deliberately not equated across providers, and uncertain or incomplete
-identities are never fuzzy matched. An integer Kalshi `N+` title is normalized
-to the equivalent sportsbook Over line `N - 0.5`.
+report. The Odds API supplies separate full `away_team` and `home_team` values
+and the adapter renders `away at home`. Kalshi market payloads instead identify
+the game through `event_ticker` (for example, a suffix such as `LARSF`), while
+their title/subtitle describe the player threshold and `event_title` may be
+absent. The former matcher preferred that absent Kalshi event title and never
+decoded the ticker, so its Kalshi event key was null and dense, otherwise
+compatible curves could not join sportsbook rows.
+
+The scanner now resolves exact full NFL team names and an allowlist of
+unambiguous abbreviations to franchise IDs, then sorts the two IDs into an
+orientation-independent identity such as `nfl:lar:sf`. Provider-native game IDs
+are deliberately not compared, ambiguous abbreviations are rejected, and no
+fuzzy team or player matching is performed. Player normalization is limited to
+case, whitespace, Unicode punctuation, and periods. An integer Kalshi `N+`
+title is normalized to the equivalent sportsbook Over line `N - 0.5`.
 
 Each exact match retains Hard Rock's raw American prices, implied and paired
 no-vig probabilities, the reference median line, same-threshold reference
@@ -85,7 +95,11 @@ no-vig consensus, contributing books, and Kalshi bid, ask, descriptive
 midpoint, last trade, spread, timestamp, volume, and open interest. Kalshi
 contracts are also exposed as a non-interpolated threshold curve with
 monotonicity and nearest-below/exact/above points. The response has separate
-unmatched Hard Rock and Kalshi lists for coverage diagnosis.
+unmatched Hard Rock and Kalshi lists for coverage diagnosis. Unmatched reasons
+now distinguish market, player, event, and exact-threshold failures on both
+sides. `diagnostic_funnel` reports the Cartesian candidate count followed by
+event, player, market, and threshold survivors, plus the requested independent
+market → player → event → threshold dimension audit.
 
 Signals are descriptive booleans: `line_divergence` uses the absolute Hard
 Rock/reference-median line difference; `price_divergence` compares Hard Rock's

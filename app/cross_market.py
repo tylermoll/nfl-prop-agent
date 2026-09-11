@@ -4,16 +4,36 @@ from collections import defaultdict
 from statistics import median
 
 from app.consensus import _book_quote, _player_key
+from app.identities import event_identity
 from app.models import MarketSnapshot
 
 
 def _event_key(row: MarketSnapshot) -> str | None:
-    """Return a strict cross-provider event identity (never guess from a ticker)."""
-    if row.event_name:
-        return _player_key(row.event_name)
-    if row.away_team and row.home_team:
-        return f"{_player_key(row.away_team)} at {_player_key(row.home_team)}"
-    return None
+    """Return a strict cross-provider matchup, never a provider-native ID."""
+    ticker = row.game_id if row.source == "kalshi" else None
+    return event_identity(home_team=row.home_team, away_team=row.away_team,
+                          event_name=row.event_name, event_ticker=ticker)
+
+
+def _relationship(row: MarketSnapshot) -> tuple[str | None, str, str, float | None]:
+    return _event_key(row), _player_key(row.player_name), row.market_type.value, row.line
+
+
+def _unmatched_reason(subject: tuple, candidates: list[tuple], other: str) -> str:
+    """Classify failure in market -> player -> event -> threshold order."""
+    event, player, market, line = subject
+    same_market = [candidate for candidate in candidates if candidate[2] == market]
+    if not same_market:
+        return f"no_matching_{other}_market"
+    same_player = [candidate for candidate in same_market if candidate[1] == player]
+    if not same_player:
+        return f"no_matching_{other}_player"
+    same_event = [candidate for candidate in same_player if event is not None and candidate[0] == event]
+    if not same_event:
+        return f"no_matching_{other}_event"
+    if not any(candidate[3] == line for candidate in same_event):
+        return f"no_exact_{other}_threshold"
+    raise AssertionError("an exact candidate cannot be classified as unmatched")
 
 
 def _curve(rows: list[MarketSnapshot], hard_rock_line: float) -> dict:
@@ -52,15 +72,21 @@ def unified_opportunity_scan(
     if min_reference_books < 1:
         raise ValueError("min_reference_books must be at least one")
     sports, kalshi = defaultdict(list), defaultdict(list)
+    kalshi_rows = []
     for row in rows:
         event = _event_key(row)
-        if event is None or row.line is None:
+        if row.line is None:
             continue
         key = (event, _player_key(row.player_name), row.market_type.value)
-        (kalshi if row.source == "kalshi" else sports)[key].append(row)
+        if row.source == "kalshi":
+            kalshi[key].append(row)
+            kalshi_rows.append(row)
+        else:
+            sports[key].append(row)
 
     opportunities, unmatched_hard_rock = [], []
     matched_kalshi_ids: set[str] = set()
+    qualified_targets: list[tuple[tuple, list[MarketSnapshot], dict, dict]] = []
     for key, items in sports.items():
         by_book = defaultdict(list)
         for row in items:
@@ -78,6 +104,12 @@ def unified_opportunity_scan(
                 "reason": "insufficient_reference_books",
             })
             continue
+        qualified_targets.append((key, items, hard_rock, refs))
+
+    kalshi_relationships = [_relationship(row) for row in kalshi_rows]
+    hard_rock_relationships = [(key[0], key[1], key[2], hard_rock["line"])
+                               for key, _, hard_rock, _ in qualified_targets]
+    for key, items, hard_rock, refs in qualified_targets:
         curve_rows = kalshi.get(key, [])
         curve = _curve(curve_rows, hard_rock["line"])
         exact = next((r for r in curve_rows if r.line == hard_rock["line"]), None)
@@ -85,10 +117,16 @@ def unified_opportunity_scan(
             unmatched_hard_rock.append({
                 "game": key[0], "player": next(r.player_name for r in items if r.source == target_bookmaker),
                 "market": key[2], "threshold": hard_rock["line"],
-                "reason": "no_exact_kalshi_threshold",
+                "reason": _unmatched_reason(
+                    (key[0], key[1], key[2], hard_rock["line"]),
+                    kalshi_relationships, "kalshi"),
             })
             continue
-        matched_kalshi_ids.add(exact.source_market_id)
+        # Multiple listings at the same exact identity are all matched for
+        # coverage diagnostics; the first remains the deterministic quote used
+        # by the existing opportunity payload.
+        matched_kalshi_ids.update(
+            row.source_market_id for row in curve_rows if row.line == hard_rock["line"])
         reference_lines = [quote["line"] for quote in refs.values()]
         reference_median = float(median(reference_lines)) if reference_lines else None
         same_line_probs = [quote["over_no_vig_probability"] for quote in refs.values()
@@ -143,10 +181,39 @@ def unified_opportunity_scan(
     unmatched_kalshi = [{
         "source_market_id": row.source_market_id, "game": row.event_name,
         "player": row.player_name, "market": row.market_type.value, "threshold": row.line,
-        "reason": "no_exact_hard_rock_prop",
-    } for row in rows if row.source == "kalshi" and row.source_market_id not in matched_kalshi_ids]
+        "reason": _unmatched_reason(_relationship(row), hard_rock_relationships, "hard_rock"),
+    } for row in kalshi_rows if row.source_market_id not in matched_kalshi_ids]
+
+    relationships = [(target, candidate) for target in hard_rock_relationships
+                     for candidate in kalshi_relationships]
+    after_event = [pair for pair in relationships if pair[0][0] is not None and pair[0][0] == pair[1][0]]
+    after_player = [pair for pair in after_event if pair[0][1] == pair[1][1]]
+    after_market = [pair for pair in after_player if pair[0][2] == pair[1][2]]
+    after_threshold = [pair for pair in after_market if pair[0][3] == pair[1][3]]
+    market_first = [pair for pair in relationships if pair[0][2] == pair[1][2]]
+    market_player = [pair for pair in market_first if pair[0][1] == pair[1][1]]
+    market_player_event = [pair for pair in market_player
+                           if pair[0][0] is not None and pair[0][0] == pair[1][0]]
+    dimension_audit = {
+        "after_canonical_market_match": len(market_first),
+        "after_player_name_match": len(market_player),
+        "after_event_game_match": len(market_player_event),
+        "after_exact_normalized_threshold_match": sum(
+            target[3] == candidate[3] for target, candidate in market_player_event),
+    }
+    diagnostic_funnel = {
+        "hard_rock_props": len(hard_rock_relationships),
+        "kalshi_contracts": len(kalshi_relationships),
+        "candidate_relationships": len(relationships),
+        "after_event_match": len(after_event),
+        "after_player_match": len(after_player),
+        "after_market_match": len(after_market),
+        "after_threshold_match": len(after_threshold),
+        "dimension_audit_market_player_event_threshold": dimension_audit,
+    }
     return {"opportunities": opportunities, "unmatched_hard_rock_props": unmatched_hard_rock,
-            "unmatched_kalshi_contracts": unmatched_kalshi}
+            "unmatched_kalshi_contracts": unmatched_kalshi,
+            "diagnostic_funnel": diagnostic_funnel}
 
 
 def cross_market_comparisons(rows: list[MarketSnapshot], **kwargs) -> list[dict]:
