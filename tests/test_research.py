@@ -74,7 +74,25 @@ def test_empty_database_and_html(research_client):
     assert client.get("/research/observations").json()["items"] == []
     summary = client.get("/research/summary").json()
     assert summary["total_observations"] == 0 and summary["latest_quota_state"] is None
-    assert "not betting recommendations" in client.get("/research").text
+    assert summary["performance_metrics"] is None
+    assert summary["performance_note"] == "Performance metrics will appear after prospective observations are settled."
+    page = client.get("/research").text
+    assert "not betting recommendations" in page
+    assert "Waiting for first scheduled capture" in page
+    assert "Player Prop Opportunities" in page
+    assert calls == []
+
+
+def test_dashboard_is_read_only_and_has_filters_without_recommendation_labels(research_client):
+    client, _, calls = research_client
+    page = client.get("/research").text
+    assert all(name in page for name in ('id="market"', 'id="side"', 'id="window"',
+                                         'id="tier"', 'id="settled"', 'id="search"'))
+    assert "fetch('/research/summary')" in page
+    assert "fetch('/research/observations?limit=200')" in page
+    assert "method=\"post\"" not in page.lower()
+    assert not any(label in page for label in (">BET<", ">PASS<", ">LOCK<", "BEST BET"))
+    assert "Performance metrics will appear after prospective observations are settled." in page
     assert calls == []
 
 
@@ -100,6 +118,23 @@ def test_observation_listing_detail_settlement_and_unsettled(research_client):
     assert unsettled["settlement_status"] == "unsettled" and unsettled["settlement"] is None
 
 
+def test_observation_timeline_groups_identity_without_provider_calls(research_client):
+    client, engine, calls = research_client
+    seed(engine)
+    earlier = observation_row("obs-0", observed_at_utc=NOW-timedelta(hours=4), line=248.5,
+                              context={"capture_slot": "6h"})
+    unrelated = observation_row("other-game", game_id="game-x", context={"capture_slot": "6h"})
+    with engine.begin() as conn:
+        conn.execute(insert(observations), [earlier, unrelated])
+    result = client.get("/research/observations/obs-1/timeline")
+    assert result.status_code == 200
+    items = result.json()["items"]
+    assert [item["observation_id"] for item in items] == ["obs-0", "obs-1"]
+    assert [item["capture_window"] for item in items] == ["6h", "90m"]
+    assert client.get("/research/observations/missing/timeline").status_code == 404
+    assert calls == []
+
+
 @pytest.mark.parametrize("query, expected", [
     ("market=player_receptions", ["obs-2"]), ("player=Example%20Player", ["obs-1"]),
     ("event=BUF", ["obs-2", "obs-1"]), ("side=under", ["obs-2"]),
@@ -120,7 +155,12 @@ def test_date_filter_summary_and_missing_404(research_client):
     assert result["settlement_counts"] == {"settled": 1, "unsettled": 1}
     assert result["scheduler_capture_counts"]["failed"] == 1
     assert result["latest_successful_execution"]["execution_id"] == "exec-1"
-    assert result["performance_metrics"] is None and calls == []
+    performance = result["performance_metrics"]
+    assert performance["settled_count"] == 1 and performance["wins"] == 1
+    assert performance["paper_profit_loss"] == pytest.approx(9.09)
+    assert performance["realized_roi"] == pytest.approx(.909)
+    assert performance["brier_score"] == pytest.approx((.56-1) ** 2)
+    assert result["represented_matchups"] == 1 and calls == []
     assert client.get("/research/observations/missing").status_code == 404
 
 

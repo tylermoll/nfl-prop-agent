@@ -1,7 +1,6 @@
 """Read-only, sanitized views over persisted shadow-research data."""
 from __future__ import annotations
 
-import html
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -13,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import and_, create_engine, or_, select
 
 from app.config import settings
+from app.research_dashboard import DASHBOARD_HTML
 from app.shadow_storage import normalize_database_url, observations, scheduler_executions, scheduler_slots, settlements
 
 router = APIRouter(prefix="/research", tags=["research"])
@@ -89,6 +89,27 @@ class ResearchRepository:
             row = conn.execute(query).first()
             return observation_view(dict(row._mapping), detail=True) if row else None
 
+    def timeline(self, observation_id: str) -> list[dict] | None:
+        """Fetch the complete pregame series for one observation's market identity."""
+        with self.engine.connect() as conn:
+            anchor = conn.execute(select(observations).where(
+                observations.c.observation_id == observation_id)).first()
+            if anchor is None:
+                return None
+            row = anchor._mapping
+            identity = [observations.c.game_id == row["game_id"],
+                        observations.c.player_name == row["player_name"],
+                        observations.c.canonical_market == row["canonical_market"],
+                        observations.c.side == row["side"],
+                        observations.c.observed_at_utc < observations.c.kickoff_utc]
+            if row["player_id"] is None:
+                identity.append(observations.c.player_id.is_(None))
+            else:
+                identity.append(observations.c.player_id == row["player_id"])
+            rows = conn.execute(select(observations).where(and_(*identity)).order_by(
+                observations.c.observed_at_utc, observations.c.observation_id)).all()
+        return [observation_view(dict(item._mapping), detail=False) for item in rows]
+
 
 @lru_cache
 def get_repository() -> ResearchRepository:
@@ -162,6 +183,36 @@ def filter_params(market: str | None = None, player: str | None = None, event: s
     return locals()
 
 
+def _performance(rows: list[dict]) -> dict | None:
+    settled_rows = [row for row in rows if row.get("settled_at_utc") is not None]
+    if not settled_rows:
+        return None
+
+    def aggregate(items: list[dict]) -> dict:
+        outcomes = Counter(str(row.get("result") or "").lower() for row in items)
+        return {"count": len(items), "wins": outcomes["win"], "losses": outcomes["loss"],
+                "pushes": outcomes["push"],
+                "paper_profit_loss": sum(float(row.get("fixed_unit_profit_loss") or 0) for row in items)}
+
+    def groups(key) -> dict:
+        names = sorted({str(key(row) or "unknown") for row in settled_rows})
+        return {name: aggregate([row for row in settled_rows if str(key(row) or "unknown") == name])
+                for name in names}
+
+    result = aggregate(settled_rows)
+    total_staked = sum(float(row.get("fixed_unit") or 0) for row in settled_rows)
+    result["realized_roi"] = result["paper_profit_loss"] / total_staked if total_staked else 0
+    result["brier_score"] = sum((float(row["model_probability"]) -
+                                 (1.0 if str(row.get("result")).lower() == "win" else
+                                  0.5 if str(row.get("result")).lower() == "push" else 0.0)) ** 2
+                                for row in settled_rows) / len(settled_rows)
+    result["settled_count"] = result.pop("count")
+    result["by_market"] = groups(lambda row: row["canonical_market"])
+    result["by_edge_tier"] = groups(lambda row: row["edge_bucket"])
+    result["by_capture_window"] = groups(lambda row: (row.get("context") or {}).get("capture_slot"))
+    return result
+
+
 @router.get("/executions")
 def list_executions(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
                     repo: ResearchRepository = Depends(get_repository)):
@@ -181,12 +232,21 @@ def get_observation(observation_id: str, repo: ResearchRepository = Depends(get_
     return row
 
 
+@router.get("/observations/{observation_id}/timeline")
+def observation_timeline(observation_id: str, repo: ResearchRepository = Depends(get_repository)):
+    rows = repo.timeline(observation_id)
+    if rows is None:
+        raise HTTPException(404, "Observation not found")
+    return {"items": rows}
+
+
 @router.get("/summary")
 def summary(repo: ResearchRepository = Depends(get_repository)):
     today = datetime.now(timezone.utc).date()
     with repo.engine.connect() as conn:
-        rows = [dict(r._mapping) for r in conn.execute(select(observations, settlements.c.settled_at_utc).outerjoin(
-            settlements, observations.c.observation_id == settlements.c.observation_id))]
+        rows = [dict(r._mapping) for r in conn.execute(select(
+            observations, *[c for c in settlements.c if c.name != "observation_id"]
+        ).outerjoin(settlements, observations.c.observation_id == settlements.c.observation_id))]
         slots = list(conn.execute(select(scheduler_slots.c.status)))
         executions = repo.executions(200, 0)
     settled_count = sum(r["settled_at_utc"] is not None for r in rows)
@@ -200,15 +260,16 @@ def summary(repo: ResearchRepository = Depends(get_repository)):
         "scheduler_capture_counts": {k: sum(s.status == k for s in slots) for k in ("failed", "deferred")},
         "latest_successful_execution": successful, "latest_feature_build_timestamp": max((_utc(r["feature_built_at_utc"]) for r in rows), default=None),
         "latest_observation_timestamp": max((_utc(r["observed_at_utc"]) for r in rows), default=None),
+        "represented_matchups": len({r["game_id"] for r in rows}),
         "current_model_versions_observed": sorted({r["model_version"] for r in rows}),
+        "latest_scheduler_execution_timestamp": latest["started_at_utc"] if latest else None,
         "latest_quota_state": ({"before": latest["quota_before"], "after": latest["quota_after"]} if latest else None),
-        "performance_metrics": None, "performance_note": "Performance is not reported unless observations are settled."}
+        "performance_metrics": _performance(rows),
+        "performance_note": (None if settled_count else
+                             "Performance metrics will appear after prospective observations are settled.")}
 
 
 @router.get("", response_class=HTMLResponse, include_in_schema=False)
 def dashboard(repo: ResearchRepository = Depends(get_repository)):
-    data = summary(repo)
-    recent = repo.observations({}, 10, 0)
-    rows = "".join(f"<tr><td>{html.escape(str(x['captured_at_utc']))}</td><td>{html.escape(x['player']['name'])}</td>"
-                   f"<td>{html.escape(x['canonical_market'])}</td><td>{html.escape(x['edge_tier'])}</td></tr>" for x in recent)
-    return HTMLResponse(f"<!doctype html><html><head><title>NFL research observations</title><style>body{{font:16px system-ui;max-width:1100px;margin:2rem auto}}table{{border-collapse:collapse;width:100%}}td,th{{padding:.5rem;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><h1>Production research observations</h1><p>Descriptive, read-only research views — not betting recommendations.</p><h2>Health</h2><p>Total observations: <b>{data['total_observations']}</b> · Settled: <b>{data['settlement_counts']['settled']}</b> · Latest observation: <b>{data['latest_observation_timestamp'] or 'none'}</b></p><h2>Latest captures</h2><table><thead><tr><th>Captured (UTC)</th><th>Player</th><th>Market</th><th>Edge tier</th></tr></thead><tbody>{rows}</tbody></table><p><a href='/research/summary'>JSON summary</a> · <a href='/docs'>API documentation</a></p></body></html>")
+    # Keep presentation static: all live values come from the existing read-only JSON API.
+    return HTMLResponse(DASHBOARD_HTML)
