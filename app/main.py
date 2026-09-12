@@ -7,8 +7,10 @@ from app.providers.kalshi import KalshiProvider
 from app.services import source_quality, disagreements
 from app.consensus import market_divergences
 from app.cross_market import cross_market_comparisons, unified_opportunity_scan
+from app.research import router as research_router
 
 app = FastAPI(title="NFL Prop Agent V1")
+app.include_router(research_router)
 
 async def load_rows():
     if not settings.demo_mode:

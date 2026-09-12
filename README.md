@@ -53,6 +53,11 @@ python -m app.main
 
 Then open `http://localhost:8000/health` and `http://localhost:8000/source-quality`.
 
+Persisted production shadow activity can be audited at the read-only HTML
+dashboard `http://localhost:8000/research` and its JSON endpoints. See
+[`docs/research-dashboard.md`](docs/research-dashboard.md) for filters and
+response shapes. These descriptive views are not betting recommendations.
+
 By default `DEMO_MODE=true`, so it runs with deterministic mock data.
 
 ## Before live data
