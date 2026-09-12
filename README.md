@@ -22,6 +22,8 @@ research-only and cannot place a wager or order.
 The quota-aware prospective capture scheduler, targeted event requests,
 idempotent slot ledger, dry-run CLI, cost model, and deployment guidance are
 documented in [`docs/snapshot-scheduler.md`](docs/snapshot-scheduler.md).
+The atomic nflverse-only production current-feature refresh job is documented
+in [`docs/current-features.md`](docs/current-features.md).
 
 ## What V1 does
 1. Pulls NFL event/prop data from odds providers.
