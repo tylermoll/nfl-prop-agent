@@ -9,7 +9,8 @@ from app.settlement import SettlementCycle
 from app.shadow_storage import ShadowStore, observations, settlements
 
 NOW = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
-KICKOFF = datetime(2026, 9, 13, 20, tzinfo=timezone.utc)
+# nflverse's 20:00 Eastern kickoff falls after midnight UTC during EDT.
+KICKOFF = datetime(2026, 9, 14, 0, tzinfo=timezone.utc)
 
 
 def observation(identifier="o1", *, market="player_pass_yds", side="over", line=249.5,

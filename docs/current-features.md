@@ -14,6 +14,9 @@ stable player/team identity. Season-to-date statistics and team rest reset by
 season, so Week 1 has no season-to-date value and no artificial offseason rest.
 All source games must be completed before the build time (which is strictly
 before every target kickoff); released future or target-game rows are ignored.
+The nflverse `gameday`/`gametime` pair is an Eastern wall-clock value. The
+normalizer localizes it with `America/New_York` (including EST/EDT rules) before
+converting it to UTC; it never labels that naive source value as UTC.
 
 Run it on Railway with the model artifact environment variables and output all
 pointing into the same mounted volume:
@@ -37,3 +40,8 @@ are sufficient in the offseason. The JSON report records retrieval/cutoff
 times, requested/used history seasons and row counts, per-player history status,
 exclusions, schema status, destination, and run time without printing source
 URLs.
+
+After deploying a schedule-timezone normalization change, rebuild any existing
+current-feature cache before running production. Kickoff is part of the exact
+feature/provider identity, so a cache written with naive Eastern values labeled
+as UTC cannot match provider event commence times safely.

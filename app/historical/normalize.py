@@ -8,6 +8,7 @@ from app.identities import canonical_team, normalize_player_name
 
 
 TEAM_RENAMES = {"LA": "LAR", "OAK": "LV", "SD": "LAC", "STL": "LAR"}
+NFLVERSE_SCHEDULE_TIMEZONE = "America/New_York"
 
 
 def normalize_weekly(weekly: pd.DataFrame) -> pd.DataFrame:
@@ -50,9 +51,18 @@ def normalize_schedules(schedules: pd.DataFrame) -> pd.DataFrame:
     games["away_team"] = games["away_team"].replace(TEAM_RENAMES).map(canonical_team)
     if "gametime" not in games:
         games["gametime"] = "00:00"
-    games["kickoff"] = pd.to_datetime(
-        games["gameday"].astype(str) + " " + games["gametime"].fillna("00:00").astype(str), utc=True
+    # nflverse's ``gameday`` and ``gametime`` fields are US Eastern wall-clock
+    # values, not UTC values.  Localize first so the IANA timezone database
+    # applies the correct EST/EDT offset for the date, then convert to UTC.
+    # Passing utc=True directly to the naive combined value merely labels the
+    # Eastern clock reading as UTC and moves every kickoff four/five hours early.
+    local_kickoff = pd.to_datetime(
+        games["gameday"].astype(str) + " " + games["gametime"].fillna("00:00").astype(str),
+        errors="raise",
     )
+    games["kickoff"] = local_kickoff.dt.tz_localize(
+        NFLVERSE_SCHEDULE_TIMEZONE, ambiguous="raise", nonexistent="raise"
+    ).dt.tz_convert("UTC")
     games["canonical_event_id"] = games.apply(
         lambda row: f"nfl:{int(row.season)}:{int(row.week)}:{row.away_team}:{row.home_team}", axis=1
     )

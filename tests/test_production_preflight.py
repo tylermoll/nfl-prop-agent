@@ -11,7 +11,7 @@ from app.modeling.benchmark import MARKETS
 from app.modeling.live import FootballArtifactScorer
 from app.production_pipeline import ProductionModels
 from app.shadow_storage import metadata
-from scripts.run_production_preflight import run_preflight
+from scripts.run_production_preflight import _kickoff_crosscheck, run_preflight
 
 NOW = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
 
@@ -56,6 +56,27 @@ def cache_rows():
     enriched["_player"] = enriched.player_name.str.lower()
     enriched["_event"] = "MIA@BUF"
     return enriched
+
+
+def test_current_feature_and_provider_events_match_on_true_utc_kickoff():
+    future = cache_rows()
+    future["_kickoff"] = pd.Timestamp("2026-09-13T17:00:00Z")
+    future["_event"] = "nfl:buf:mia"
+    exact = _kickoff_crosscheck([{
+        "id": "odds-event", "away_team": "Miami Dolphins", "home_team": "Buffalo Bills",
+        "commence_time": "2026-09-13T17:00:00Z",
+    }], future)
+    assert exact["status"] == "passed"
+    assert exact["matched_event_count"] == 1
+    assert exact["comparisons"][0]["absolute_difference_seconds"] == 0
+
+    mislabeled_eastern_as_utc = _kickoff_crosscheck([{
+        "id": "odds-event", "away_team": "Miami Dolphins", "home_team": "Buffalo Bills",
+        "commence_time": "2026-09-13T17:00:00Z",
+    }], future.assign(_kickoff=pd.Timestamp("2026-09-13T13:00:00Z")))
+    assert mislabeled_eastern_as_utc["status"] == "failed"
+    assert mislabeled_eastern_as_utc["material_mismatch_count"] == 1
+    assert mislabeled_eastern_as_utc["comparisons"][0]["absolute_difference_seconds"] == 4 * 3600
 
 
 @pytest.mark.asyncio
