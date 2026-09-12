@@ -23,7 +23,16 @@ def normalize_weekly(weekly: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"weekly stats missing canonical keys: {missing}")
     if result["player_id"].isna().any():
-        raise ValueError("stable nflverse player_id is required; name-only rows are not guessed")
+        unidentified = result[result["player_id"].isna()]
+        material = pd.Series(False, index=unidentified.index)
+        for column in ("attempts", "targets", "receptions", "passing_yards", "receiving_yards"):
+            if column in unidentified:
+                material |= pd.to_numeric(unidentified[column], errors="coerce").fillna(0).ne(0)
+        if material.any():
+            raise ValueError("stable nflverse player_id is required for every model-relevant weekly row")
+        # nflverse includes non-player/team aggregate placeholders with no ID and
+        # no passing/receiving participation. They cannot create a market row.
+        result = result[result["player_id"].notna()].copy()
     result["player_name_normalized"] = result["player_name"].map(normalize_player_name)
     result["team"] = result["team"].replace(TEAM_RENAMES).map(canonical_team)
     if result["team"].isna().any():
