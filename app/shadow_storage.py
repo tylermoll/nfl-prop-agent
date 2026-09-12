@@ -35,9 +35,21 @@ scheduler_executions = Table("shadow_scheduler_executions", metadata,
     Column("execution_id", String(36), primary_key=True), Column("started_at_utc", DateTime(timezone=True), nullable=False),
     Column("ended_at_utc", DateTime(timezone=True)), Column("details", JSON, nullable=False))
 
+def normalize_database_url(database_url: str) -> str:
+    """Select Psycopg 3 for driverless PostgreSQL URLs.
+
+    Explicit SQLAlchemy driver names and non-PostgreSQL URLs are left alone.
+    The URL is deliberately not logged because it may contain credentials.
+    """
+    railway_scheme = "postgresql://"
+    if database_url.startswith(railway_scheme):
+        return "postgresql+psycopg://" + database_url[len(railway_scheme):]
+    return database_url
+
+
 class ShadowStore:
     def __init__(self, database_url: str):
-        self.engine = create_engine(database_url)
+        self.engine = create_engine(normalize_database_url(database_url))
         metadata.create_all(self.engine)
     def append(self, row: dict) -> None:
         allowed = {c.name for c in observations.columns}
