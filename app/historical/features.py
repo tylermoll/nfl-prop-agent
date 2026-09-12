@@ -84,7 +84,8 @@ def _opponent_features(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_modeling_table(weekly: pd.DataFrame, schedules: pd.DataFrame, *, snaps: pd.DataFrame | None = None,
-                         injuries: pd.DataFrame | None = None, depth_charts: pd.DataFrame | None = None) -> pd.DataFrame:
+                         injuries: pd.DataFrame | None = None, depth_charts: pd.DataFrame | None = None,
+                         current_row_column: str | None = None) -> pd.DataFrame:
     """Build one player/game/market row using only observations before kickoff."""
     stats, games = normalize_weekly(weekly), normalize_schedules(schedules)
     home = games[["season", "week", "game_id", "kickoff", "canonical_event_id", "home_team", "away_team"]].copy()
@@ -122,6 +123,11 @@ def build_modeling_table(weekly: pd.DataFrame, schedules: pd.DataFrame, *, snaps
     joined = joined.merge(team_games[["game_id", "team", "days_rest"]], on=["game_id", "team"], how="left")
     rows = pd.concat([joined.assign(canonical_market=market, actual_value=joined[target]) for market, target in MARKETS.items()], ignore_index=True)
     applicable = ((rows.canonical_market == "player_pass_yds") & (rows.attempts > 0)) | ((rows.canonical_market != "player_pass_yds") & ((rows.targets > 0) | (rows.receptions > 0)))
+    # A current builder may append outcome-free target rows.  They must pass
+    # through the *same* transforms as benchmark rows, but are not made
+    # applicable merely by fabricated current-game usage.
+    if current_row_column and current_row_column in rows:
+        applicable |= rows[current_row_column].fillna(False).astype(bool)
     rows = rows[applicable].sort_values(["kickoff", "game_id", "player_id", "canonical_market"]).reset_index(drop=True)
     rows = _lag_features(rows)
     rows = _usage_features(rows)
