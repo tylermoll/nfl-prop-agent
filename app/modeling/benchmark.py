@@ -77,6 +77,11 @@ class BenchmarkConfig:
     random_state: int = 417
     threshold_offsets: tuple[float, ...] = (-1.0, -0.5, 0.0, 0.5, 1.0)
     calibration_bins: int = 10
+    # Production bootstrap has no retrospective test set: the named validation
+    # season is used for selection, reporting, and calibration, while the fitted
+    # estimator remains training-season-only.
+    production_bootstrap: bool = False
+    training_seasons: tuple[int, ...] | None = None
 
 
 def validate_feature_names(columns: Iterable[str]) -> list[str]:
@@ -107,6 +112,25 @@ def chronological_split(frame: pd.DataFrame, config: BenchmarkConfig) -> dict[st
     data = frame.copy()
     data["kickoff"] = pd.to_datetime(data["kickoff"], utc=True)
     seasons = sorted(int(x) for x in data.season.dropna().unique())
+    if config.production_bootstrap:
+        validation = config.validation_season
+        if validation is None:
+            raise ValueError("production bootstrap requires validation_season")
+        requested = set(config.training_seasons or (s for s in seasons if s < validation))
+        if not requested or any(s >= validation for s in requested):
+            raise ValueError("training seasons must be non-empty and precede validation")
+        unexpected = set(seasons) - requested - {validation}
+        if unexpected:
+            raise ValueError(f"outcome seasons outside production split: {sorted(unexpected)}")
+        train = data[data.season.isin(requested)].sort_values("kickoff").copy()
+        calibration = data[data.season == validation].sort_values("kickoff").copy()
+        if train.empty or calibration.empty:
+            raise ValueError("empty production training or validation split")
+        if len(train) < config.minimum_train_rows:
+            raise ValueError(f"training split has {len(train)} rows; need {config.minimum_train_rows}")
+        if train.kickoff.max() >= calibration.kickoff.min():
+            raise ValueError("split is not strictly chronological")
+        return {"train": train, "validation": calibration, "test": calibration.copy()}
     test = config.test_season if config.test_season is not None else (seasons[-1] if seasons else None)
     validation = config.validation_season if config.validation_season is not None else (max((s for s in seasons if s < test), default=None) if test is not None else None)
     if test is None or validation is None or validation >= test:
@@ -302,7 +326,8 @@ def run_benchmark(table: pd.DataFrame, output_dir: str | Path, config: Benchmark
             "source_split": "validation",
             "fit_split": "train_only",
         }))
-        final_train = pd.concat([train, validation]).sort_values("kickoff")
+        final_train = (train if config.production_bootstrap else
+                       pd.concat([train, validation]).sort_values("kickoff"))
         final_model = make_pipeline(selected_family, selected_parameter, config.random_state)
         final_model.fit(final_train[features], final_train.actual_value)
         uncorrected_prediction = final_model.predict(test[features])
@@ -391,17 +416,18 @@ def run_benchmark(table: pd.DataFrame, output_dir: str | Path, config: Benchmark
                                   "validation_usage_missing_rate": {c: float(validation[c].isna().mean()) for c in core_usage},
                                   "imputation_indicator_count": int(len(final_model.named_steps["imputer"].indicator_.features_))},
             "residual_source": "validation rows predicted by a model fit on training rows only",
+            "production_bootstrap": config.production_bootstrap,
         }
-        # Live inference intentionally uses the uncorrected football prediction:
-        # the receiving-yards additive candidate was a benchmark diagnostic, not
-        # an approved production transform.  Validation-only residuals preserve
-        # independent, prediction-conditional uncertainty provenance.
-        live_edges = np.unique(np.quantile(calibration_prediction, np.linspace(0, 1, 5)))
-        joblib.dump({"pipeline": final_model, "additive_bias_correction": 0.0,
+        # The correction is selected solely on validation. Its matching residual
+        # distribution remains out-of-fit because the estimator saw train only.
+        live_calibration_prediction = calibration_prediction + bias_correction
+        live_calibration_residuals = calibration_residuals - bias_correction
+        live_edges = np.unique(np.quantile(live_calibration_prediction, np.linspace(0, 1, 5)))
+        joblib.dump({"pipeline": final_model, "additive_bias_correction": bias_correction,
                      "rejected_or_selected_candidate_correction": proposed_bias_correction,
                      "features": features, "canonical_market": market,
-                     "calibration_predictions": calibration_prediction,
-                     "calibration_residuals": calibration_residuals,
+                     "calibration_predictions": live_calibration_prediction,
+                     "calibration_residuals": live_calibration_residuals,
                      "prediction_bin_edges": live_edges.tolist(),
                      "uncertainty_method": "prediction_conditional_empirical_residual_ecdf",
                      "uncertainty_version": "1"}, output / f"{market}.joblib")

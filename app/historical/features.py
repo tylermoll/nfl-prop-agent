@@ -89,7 +89,10 @@ def build_modeling_table(weekly: pd.DataFrame, schedules: pd.DataFrame, *, snaps
     """Build one player/game/market row using only observations before kickoff."""
     stats, games = normalize_weekly(weekly), normalize_schedules(schedules)
     home = games[["season", "week", "game_id", "kickoff", "canonical_event_id", "home_team", "away_team"]].copy()
-    joined = stats.merge(home, on=["season", "week"], how="inner")
+    # Current nflverse weekly releases include their own game_id. Schedule IDs
+    # remain authoritative here; avoid pandas suffixes while preserving the
+    # established season/week/team join semantics.
+    joined = stats.drop(columns="game_id", errors="ignore").merge(home, on=["season", "week"], how="inner")
     joined = joined[(joined.team == joined.home_team) | (joined.team == joined.away_team)].copy()
     joined["opponent"] = np.where(joined.team == joined.home_team, joined.away_team, joined.home_team)
     joined["home_away"] = np.where(joined.team == joined.home_team, "home", "away")

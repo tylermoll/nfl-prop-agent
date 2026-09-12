@@ -47,7 +47,8 @@ class FootballArtifactScorer:
             raise ValueError("feature build timestamp must be timezone-aware")
         if len(features) != 1:
             raise ValueError("live scoring requires exactly one feature row")
-        point = float(self.artifact["pipeline"].predict(features[self.artifact["features"]])[0])
+        point = (float(self.artifact["pipeline"].predict(features[self.artifact["features"]])[0]) +
+                 float(self.artifact.get("additive_bias_correction", 0.0)))
         predictions = np.asarray(self.artifact["calibration_predictions"], float)
         residuals = np.asarray(self.artifact["calibration_residuals"], float)
         edges = np.asarray(self.artifact.get("prediction_bin_edges") or
