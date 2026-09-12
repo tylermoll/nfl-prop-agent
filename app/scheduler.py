@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from app.providers.the_odds_api import _parse_datetime
+from app.identities import canonical_event_identity
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,11 @@ def failure_category(exc: BaseException, *, stage: str) -> str:
     """Map existing capture failures to stable, deliberately coarse diagnostics."""
     message = str(exc).lower()
     name = type(exc).__name__.lower()
+    identity_stage = getattr(exc, "identity_stage", None)
+    if identity_stage in {"provider_event", "canonical_event", "current_game", "current_feature_row"}:
+        return "feature_identity_mismatch"
+    if identity_stage in {"stable_player", "event_props"}:
+        return "player_identity_mismatch"
     if stage == "provider":
         if "json" in message or "payload" in message or "response lacks" in message or "must be a json" in message:
             return "provider_payload_invalid"
@@ -98,6 +104,13 @@ def failure_category(exc: BaseException, *, stage: str) -> str:
     if stage == "model" or "model" in message or "scor" in name or "artifact" in message:
         return "model_scoring_failure"
     return "unknown_capture_failure"
+
+
+def is_non_retryable(exc: BaseException, *, stage: str) -> bool:
+    """Return true only for failures known to be deterministic for this slot."""
+    # Provider/network, database, generic empty results, and unknown model
+    # errors remain retryable. Only typed failures may opt into terminal state.
+    return bool(getattr(exc, "non_retryable", False))
 
 
 def freshness_metadata(*, captured_at: datetime, provider_observed_at: datetime | None,
@@ -137,6 +150,7 @@ class SnapshotScheduler:
         started, execution_id = self.now().astimezone(timezone.utc), str(uuid4())
         report: dict[str, Any] = {"execution_id": execution_id, "started_at_utc": started.isoformat(),
             "dry_run": dry_run, "due": [], "selected": [], "completed": [], "deferred": [], "failed": [],
+            "rejected_props": [],
             "estimated_credits": 0, "actual_credits_consumed": 0, "quota_before": None, "quota_after": None,
             "http_request_count": 0, "errors": []}
         try:
@@ -207,6 +221,9 @@ class SnapshotScheduler:
                         raise RuntimeError("football model unavailable")
                     stage = "build"
                     observations = self.build_observations(capture, rows, kalshi_rows, model, self.now())
+                    rejected = getattr(observations, "rejected_props", [])
+                    if rejected:
+                        report["rejected_props"].extend(rejected)
                     if not observations: raise RuntimeError("no eligible Hard Rock observations")
                     stage = "database"
                     if hasattr(self.store, "complete_capture"):
@@ -226,21 +243,37 @@ class SnapshotScheduler:
                     context = event_context.get(capture.event_id) or {}
                     costs = event_costs.get(capture.event_id, {})
                     attributable = capture.event_id not in charged_events
+                    deterministic = is_non_retryable(exc, stage=stage)
                     detail = {**asdict_json(capture),
                         "provider_event_id": capture.event_id,
                         "matchup": event_matchup(context),
+                        "canonical_event": canonical_event_identity(context.get("away_team"), context.get("home_team")),
                         "failure_category": failure_category(exc, stage=stage),
+                        "identity_stage": getattr(exc, "identity_stage", None),
                         "reason": message,
                         "provider_request_made": bool(costs.get("provider_request_made")),
                         "estimated_credit_cost": self.config.credits_per_event if attributable else 0,
                         "actual_credit_cost": int(costs.get("actual_credit_cost", 0)) if attributable else 0,
-                        "retryable": attempts < self.config.retry_budget and
+                        "retryable": not deterministic and attempts < self.config.retry_budget and
                             self.now().astimezone(timezone.utc) <= capture.target_time_utc + next(
                                 w.tolerance for w in self.config.windows + ((self.config.final_window,) if self.config.final_window else ())
                                 if w.name == capture.slot) and self.now().astimezone(timezone.utc) < capture.kickoff_utc}
+                    diagnostics = getattr(exc, "diagnostics", None)
+                    if isinstance(diagnostics, dict):
+                        detail["identity_diagnostics"] = diagnostics
+                        rejected_props = diagnostics.get("rejected_props")
+                        if isinstance(rejected_props, list):
+                            report["rejected_props"].extend(rejected_props)
                     charged_events.add(capture.event_id)
                     report["failed"].append(detail)
-                    self._record(capture, "failed", message, self.now(), increment=True)
+                    if deterministic:
+                        # Exhaust the slot locally: another attempt would repeat
+                        # the paid provider request against unchanged identities.
+                        old_attempts = int(old.get("attempts", 0) if old else 0)
+                        for _ in range(max(1, self.config.retry_budget - old_attempts)):
+                            self._record(capture, "failed", message, self.now(), increment=True)
+                    else:
+                        self._record(capture, "failed", message, self.now(), increment=True)
             return self._finish(report, started, persist=True)
         except Exception as exc:
             report["errors"].append({"kind": "scheduler_failure", "message": sanitized_error(exc)})
