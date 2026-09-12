@@ -130,6 +130,25 @@ Railway should run the scheduler service every five minutes with:
 python -m scripts.run_production_cycle
 ```
 
+Before enabling or debugging that cycle, run the production preflight. It is
+strictly read-only: the default command loads the three artifacts and current
+feature cache, scores representative upcoming rows, and queries database
+connectivity/history without creating tables, observations, settlements,
+capture slots, or scheduler executions. It makes no Odds API or Kalshi calls.
+
+```bash
+# Railway command: local inputs and database only (no provider requests)
+python -m scripts.run_production_preflight
+
+# Railway command: additionally opt in to minimal upcoming-event/Hard Rock checks
+python -m scripts.run_production_preflight --check-live-props
+```
+
+The optional live check requests the NFL event list and then checks upcoming
+events only until all three canonical Hard Rock prop markets have been found.
+It reports event, book, market, HTTP-request, and quota counts. It does not run
+capture scheduling and never contacts Kalshi.
+
 Set `FOOTBALL_CURRENT_FEATURE_PATH=/models/current_features.parquet` and optionally
 override `FOOTBALL_CURRENT_FEATURE_MAX_AGE_SECONDS=21600` (six hours). The cycle
 holds a nonblocking advisory `flock` on
