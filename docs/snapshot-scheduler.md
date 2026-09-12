@@ -43,6 +43,15 @@ the rest. The estimate assumes the configured books remain below the
 provider's ten-book pricing block and should be updated if that configuration
 changes.
 
+There is no scheduler backoff or cooldown. On each five-minute invocation, a
+failed slot is eligible again while it is inside its tolerance window, before
+kickoff, and below `SCHEDULER_RETRY_BUDGET` (default: two total attempts). Each
+selected retry makes a fresh paid event-level Odds API request. Retry stops at
+the first successful completion, when the attempt budget is exhausted, when
+the tolerance window/kickoff passes, or when quota/game selection defers it.
+Provider HTTP retries are separate: the adapter retries 429, 5xx, timeout, and
+network failures with bounded exponential delays inside that same invocation.
+
 Kalshi discovery is invoked once per non-empty execution and shared by every
 selected capture. Its bounded existing adapter is used with order-book depth
 disabled. Likewise, the injected model/artifact loader is called once and the
@@ -63,11 +72,13 @@ persisted when Kalshi is unavailable or reference coverage is below the
 configured minimum, provided the builder records empty context and explicit
 `kalshi_unavailable` / `insufficient_reference_coverage` flags. Values must
 never be imputed. No capture is completed without Hard Rock or a model score.
-Failures are classified in the execution details as Odds API, missing Hard
-Rock, insufficient reference coverage, Kalshi unavailable, model scoring,
-persistence, or quota/defer conditions. Provider failure cannot mutate an old
+Each failed-slot execution detail carries event ID, matchup (when discovery
+provided it), window, kickoff, a stable failure category, sanitized reason,
+whether a provider request occurred, estimated/actual attributable credits,
+and whether another attempt is eligible. Provider failure cannot mutate an old
 observation. Errors are truncated and redact URLs, API keys, tokens, and
-authorization values.
+authorization values. `/research/executions` returns these as `failed_slots`,
+and the dashboard reveals them beneath each failed execution.
 
 ## Persistence schema
 

@@ -71,10 +71,33 @@ def due_captures(events: list[dict[str, Any]], now: datetime, config: SchedulerC
 
 
 def sanitized_error(exc: BaseException) -> str:
-    text = re.sub(r"(?i)(api[_-]?key|token|authorization|password|credential)=?[^&\s]*",
+    text = re.sub(r"(?i)(api[_-]?key|token|authorization|password|credential)\s*[=:]?\s*(?:bearer\s+)?[^&\s,;]*",
                   r"\1=[REDACTED]", str(exc))
     text = re.sub(r"https?://\S+", "[URL REDACTED]", text)
     return f"{type(exc).__name__}: {text}"[:500]
+
+
+def failure_category(exc: BaseException, *, stage: str) -> str:
+    """Map existing capture failures to stable, deliberately coarse diagnostics."""
+    message = str(exc).lower()
+    name = type(exc).__name__.lower()
+    if stage == "provider":
+        if "json" in message or "payload" in message or "response lacks" in message or "must be a json" in message:
+            return "provider_payload_invalid"
+        return "provider_http_failure"
+    if stage == "database":
+        return "database_write_failure"
+    if "missing hard rock" in message:
+        return "hardrock_markets_unavailable"
+    if "player" in message and ("identity" in message or "ambiguous" in message):
+        return "player_identity_mismatch"
+    if "event identity" in message or "matchup" in message or "feature schema" in message:
+        return "feature_identity_mismatch"
+    if "no eligible" in message or "no matching" in message:
+        return "no_matching_feature_rows"
+    if stage == "model" or "model" in message or "scor" in name or "artifact" in message:
+        return "model_scoring_failure"
+    return "unknown_capture_failure"
 
 
 def freshness_metadata(*, captured_at: datetime, provider_observed_at: datetime | None,
@@ -118,6 +141,7 @@ class SnapshotScheduler:
             "http_request_count": 0, "errors": []}
         try:
             events = await self.odds.discover_events()
+            event_context = {event.get("id"): event for event in events if isinstance(event, dict)}
             due = due_captures(events, started, self.config, self.store.slot_state)
             report["due"] = [asdict_json(x) for x in due]
             remaining = self.odds.usage.get("requests_remaining")
@@ -151,22 +175,40 @@ class SnapshotScheduler:
             except Exception as exc:
                 model = None; report["errors"].append({"kind": "football_model_scoring_failure", "message": sanitized_error(exc)})
             odds_by_event: dict[str, list] = {}
+            provider_failures: dict[str, BaseException] = {}
+            event_costs: dict[str, dict[str, Any]] = {}
             ordered_events = tuple(dict.fromkeys(c.event_id for c in selected))
             for event_id in ordered_events:
+                before_requests = int(self.odds.usage.get("http_requests") or 0)
+                before_credits = int(self.odds.usage.get("quota_consumed") or 0)
                 try: odds_by_event[event_id] = await self.odds.fetch_event_player_props(event_id)
                 except Exception as exc:
                     odds_by_event[event_id] = []
+                    provider_failures[event_id] = exc
                     report["errors"].append({"kind": "odds_api_failure", "message": sanitized_error(exc)})
+                event_costs[event_id] = {
+                    "provider_request_made": int(self.odds.usage.get("http_requests") or 0) > before_requests,
+                    "actual_credit_cost": max(0, int(self.odds.usage.get("quota_consumed") or 0) - before_credits),
+                }
             actual = int(self.odds.usage.get("quota_consumed") or 0)
             report["actual_credits_consumed"] = actual
+            charged_events: set[str] = set()
             for capture in selected:
+                stage = "capture"
                 try:
+                    if capture.event_id in provider_failures:
+                        stage = "provider"
+                        raise provider_failures[capture.event_id]
                     rows = odds_by_event[capture.event_id]
                     hardrock = [r for r in rows if r.source == self.odds.bookmakers[0]]
                     if not hardrock: raise RuntimeError("missing Hard Rock market")
-                    if model is None: raise RuntimeError("football model unavailable")
+                    if model is None:
+                        stage = "model"
+                        raise RuntimeError("football model unavailable")
+                    stage = "build"
                     observations = self.build_observations(capture, rows, kalshi_rows, model, self.now())
                     if not observations: raise RuntimeError("no eligible Hard Rock observations")
+                    stage = "database"
                     if hasattr(self.store, "complete_capture"):
                         old = self.store.slot_state(capture.event_id, capture.slot, capture.target_time_utc)
                         self.store.complete_capture(observations, {"event_id": capture.event_id, "slot": capture.slot,
@@ -178,7 +220,26 @@ class SnapshotScheduler:
                         self._record(capture, "completed", None, self.now(), increment=True)
                     report["completed"].append(asdict_json(capture))
                 except Exception as exc:
-                    message = sanitized_error(exc); report["failed"].append({**asdict_json(capture), "reason": message})
+                    message = sanitized_error(exc)
+                    old = self.store.slot_state(capture.event_id, capture.slot, capture.target_time_utc)
+                    attempts = int(old.get("attempts", 0) if old else 0) + 1
+                    context = event_context.get(capture.event_id) or {}
+                    costs = event_costs.get(capture.event_id, {})
+                    attributable = capture.event_id not in charged_events
+                    detail = {**asdict_json(capture),
+                        "provider_event_id": capture.event_id,
+                        "matchup": event_matchup(context),
+                        "failure_category": failure_category(exc, stage=stage),
+                        "reason": message,
+                        "provider_request_made": bool(costs.get("provider_request_made")),
+                        "estimated_credit_cost": self.config.credits_per_event if attributable else 0,
+                        "actual_credit_cost": int(costs.get("actual_credit_cost", 0)) if attributable else 0,
+                        "retryable": attempts < self.config.retry_budget and
+                            self.now().astimezone(timezone.utc) <= capture.target_time_utc + next(
+                                w.tolerance for w in self.config.windows + ((self.config.final_window,) if self.config.final_window else ())
+                                if w.name == capture.slot) and self.now().astimezone(timezone.utc) < capture.kickoff_utc}
+                    charged_events.add(capture.event_id)
+                    report["failed"].append(detail)
                     self._record(capture, "failed", message, self.now(), increment=True)
             return self._finish(report, started, persist=True)
         except Exception as exc:
@@ -204,3 +265,8 @@ class SnapshotScheduler:
 def asdict_json(capture: DueCapture) -> dict[str, Any]:
     return {"event_id": capture.event_id, "kickoff_utc": capture.kickoff_utc.isoformat(),
             "slot": capture.slot, "target_time_utc": capture.target_time_utc.isoformat()}
+
+
+def event_matchup(event: dict[str, Any]) -> str | None:
+    away, home = event.get("away_team"), event.get("home_team")
+    return f"{away} at {home}" if isinstance(away, str) and isinstance(home, str) else None

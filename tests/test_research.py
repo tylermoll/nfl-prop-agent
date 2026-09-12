@@ -53,7 +53,11 @@ def observation_row(identifier="obs-1", **changes):
 
 
 def seed(engine):
-    details = {"dry_run": False, "due": [1, 2], "selected": [1], "completed": [1], "deferred": [2], "failed": [],
+    details = {"dry_run": False, "due": [1, 2], "selected": [1, 2], "completed": [1], "deferred": [2], "failed": [{
+                   "event_id": "game-1", "provider_event_id": "game-1", "matchup": "BUF at MIA", "slot": "24h",
+                   "kickoff_utc": NOW.isoformat(), "failure_category": "provider_http_failure",
+                   "reason": "token=slot-secret https://slot.invalid/x", "provider_request_made": True,
+                   "estimated_credit_cost": 3, "actual_credit_cost": 3, "retryable": True}],
                "estimated_credits": 3, "actual_credits_consumed": 3, "quota_before": 50, "quota_after": 47,
                "http_request_count": 2, "errors": [{"message": "token=secret https://private.invalid/x"}]}
     with engine.begin() as conn:
@@ -100,8 +104,10 @@ def test_execution_listing_newest_first_counts_and_sanitizes(research_client):
     client, engine, _ = research_client; seed(engine)
     item = client.get("/research/executions?limit=1&offset=0").json()["items"][0]
     assert item["execution_id"] == "exec-1" and item["due_count"] == 2 and item["deferred_count"] == 1
+    assert item["failed_count"] == 1 and item["failed_slots"][0]["failure_category"] == "provider_http_failure"
     serialized = str(item)
-    assert "secret" not in serialized and "private.invalid" not in serialized and "[REDACTED]" in serialized
+    assert "slot-secret" not in serialized and "private.invalid" not in serialized and "slot.invalid" not in serialized
+    assert "[REDACTED]" in serialized
 
 
 def test_observation_listing_detail_settlement_and_unsettled(research_client):

@@ -32,7 +32,8 @@ class Kalshi:
 
 def event(slot, ident="g"):
     window = next(w for w in DEFAULT_WINDOWS if w.name == slot)
-    return {"id": ident, "commence_time": (NOW + window.before_kickoff).isoformat()}
+    return {"id": ident, "commence_time": (NOW + window.before_kickoff).isoformat(),
+            "away_team": "Buffalo Bills", "home_team": "Miami Dolphins"}
 
 @pytest.mark.parametrize("slot", ["24h", "6h", "90m", "15m"])
 def test_slot_determination(slot): assert due_captures([event(slot)], NOW, SchedulerConfig(), lambda *_: None)[0].slot == slot
@@ -92,3 +93,39 @@ def test_partial_kalshi_failure_still_persists_hardrock():
     report, _, store, kalshi, _ = run_scheduler([event("15m")])
     assert report["completed"] and store.observations
     assert not any(name.startswith(("place_", "submit_", "execute_")) for name in dir(SnapshotScheduler))
+
+def test_failed_slot_report_is_categorized_costed_sanitized_and_persisted():
+    odds, store, kalshi = Odds([event("24h", "paid-event")]), Store(), Kalshi()
+    scheduler = SnapshotScheduler(odds=odds, store=store, kalshi=kalshi, load_model=lambda: object(),
+        build_observations=lambda *_: (_ for _ in ()).throw(
+            ValueError("stable player identity mismatch token=super-secret https://private.invalid")), now=lambda: NOW)
+    report = asyncio.run(scheduler.run())
+    assert len(report["failed"]) == 1 and not report["completed"]
+    failure = report["failed"][0]
+    assert failure == {**failure, "provider_event_id": "paid-event", "matchup": "Buffalo Bills at Miami Dolphins",
+        "failure_category": "player_identity_mismatch", "provider_request_made": True,
+        "estimated_credit_cost": 3, "actual_credit_cost": 3, "retryable": True}
+    assert "super-secret" not in failure["reason"] and "private.invalid" not in failure["reason"]
+    assert store.states[("paid-event", "24h", NOW)]["status"] == "failed"
+    assert store.executions[0]["details"]["failed"] == [failure]
+
+def test_failed_slot_retries_paid_request_until_budget_then_stops():
+    odds, store, kalshi = Odds([event("24h")]), Store(), Kalshi()
+    scheduler = SnapshotScheduler(odds=odds, store=store, kalshi=kalshi, load_model=lambda: object(),
+        build_observations=lambda *_: [], config=SchedulerConfig(retry_budget=2), now=lambda: NOW)
+    first = asyncio.run(scheduler.run())
+    second = asyncio.run(scheduler.run())
+    third = asyncio.run(scheduler.run())
+    assert first["failed"][0]["retryable"] is True
+    assert second["failed"][0]["retryable"] is False
+    assert not third["due"] and not third["selected"]
+    assert odds.targeted == ["g", "g"] and odds.usage["quota_consumed"] == 6
+    assert store.states[("g", "24h", NOW)]["attempts"] == 2
+
+def test_successful_slot_is_idempotent_and_does_not_repeat_paid_request():
+    odds, store, kalshi = Odds([event("24h")]), Store(), Kalshi()
+    scheduler = SnapshotScheduler(odds=odds, store=store, kalshi=kalshi, load_model=lambda: object(),
+        build_observations=lambda *_: [{"row": 1}], now=lambda: NOW)
+    assert asyncio.run(scheduler.run())["completed"]
+    assert not asyncio.run(scheduler.run())["selected"]
+    assert odds.targeted == ["g"] and odds.usage["quota_consumed"] == 3
