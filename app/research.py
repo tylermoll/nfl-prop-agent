@@ -129,7 +129,10 @@ def execution_view(row: dict) -> dict:
             "estimated_credits": detail.get("estimated_credits", 0),
             "actual_credits_consumed": detail.get("actual_credits_consumed", 0),
             "quota_before": detail.get("quota_before"), "quota_after": detail.get("quota_after"),
-            "http_request_count": detail.get("http_request_count", 0), "errors": detail.get("errors", [])}
+            "http_request_count": detail.get("http_request_count", 0), "errors": detail.get("errors", []),
+            # Historically this list was persisted but discarded here, which
+            # made aggregate failures impossible to diagnose from /research.
+            "failed_slots": detail.get("failed", []) if isinstance(detail.get("failed", []), list) else []}
 
 
 def observation_view(row: dict, *, detail: bool) -> dict:
