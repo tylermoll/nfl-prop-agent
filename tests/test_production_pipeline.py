@@ -10,7 +10,8 @@ from sklearn.dummy import DummyRegressor
 from app.config import settings
 from app.modeling.benchmark import MARKETS
 from app.models import MarketSnapshot, MarketType, Side
-from app.production_pipeline import CurrentFeatureCache, create_scheduler_pipeline
+from app.production_pipeline import (CurrentFeatureCache, IdentityResolutionError,
+                                     create_scheduler_pipeline)
 from app.scheduler import DueCapture
 
 NOW = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
@@ -84,8 +85,60 @@ def test_missing_player_identity_fails_closed(monkeypatch, tmp_path):
     loader, builder = create_scheduler_pipeline()
     capture = DueCapture("provider-g", KICKOFF, "90m", NOW)
     quote = _row(); quote.player_name = "Unknown Player"
-    with pytest.raises(ValueError, match="identity"):
+    with pytest.raises(IdentityResolutionError, match="all eligible") as error:
         builder(capture, [quote], [], loader(), NOW)
+    rejected = error.value.diagnostics["rejected_props"][0]
+    assert rejected["identity_stage"] == "stable_player"
+    assert rejected["provider_event_id"] == "provider-g"
+    assert rejected["provider_player_name"] == "Unknown Player"
+    assert rejected["candidate_stable_ids"] == []
+    assert rejected["candidate_feature_row_count"] == 0
+    assert rejected["canonical_market"] == "player_pass_yds"
+
+
+def test_one_unresolved_player_does_not_discard_resolvable_props(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    loader, builder = create_scheduler_pipeline()
+    unknown = _row(side=Side.OVER)
+    unknown.player_name = "Unknown Player"
+    result = builder(DueCapture("provider-g", KICKOFF, "90m", NOW),
+                     [unknown, _row(side=Side.UNDER)], [], loader(), NOW)
+    assert len(result) == 1 and result[0]["player_id"] == "00-123"
+    assert result[0]["side"] == "under"
+    assert len(result.rejected_props) == 1
+    assert result.rejected_props[0]["identity_stage"] == "stable_player"
+
+
+def test_exact_name_ambiguity_is_rejected_without_selecting_an_id(monkeypatch, tmp_path):
+    _, cache = _configure(monkeypatch, tmp_path)
+    frame = pd.read_csv(cache)
+    frame = pd.concat([frame, frame.assign(player_id="00-999")], ignore_index=True)
+    frame.to_csv(cache, index=False)
+    loaded = CurrentFeatureCache(cache)
+    with pytest.raises(IdentityResolutionError) as error:
+        loaded.row(_row(), DueCapture("provider-g", KICKOFF, "90m", NOW), ["x"], NOW)
+    detail = error.value.diagnostics
+    assert detail["identity_stage"] == "stable_player"
+    assert detail["candidate_stable_ids"] == ["00-123", "00-999"]
+
+
+def test_player_name_is_never_matched_across_games(monkeypatch, tmp_path):
+    _, cache = _configure(monkeypatch, tmp_path)
+    frame = pd.read_csv(cache)
+    frame["kickoff"] = (KICKOFF + timedelta(days=7)).isoformat()
+    frame.to_csv(cache, index=False)
+    loaded = CurrentFeatureCache(cache)
+    with pytest.raises(IdentityResolutionError) as error:
+        loaded.row(_row(), DueCapture("provider-g", KICKOFF, "90m", NOW), ["x"], NOW)
+    assert error.value.identity_stage == "current_game"
+
+
+def test_provider_event_id_must_equal_scheduled_event(monkeypatch, tmp_path):
+    _, cache = _configure(monkeypatch, tmp_path)
+    with pytest.raises(IdentityResolutionError) as error:
+        CurrentFeatureCache(cache).row(
+            _row(), DueCapture("different-provider-event", KICKOFF, "90m", NOW), ["x"], NOW)
+    assert error.value.identity_stage == "provider_event"
 
 
 def test_valid_side_observations_provenance_and_partial_context(monkeypatch, tmp_path):

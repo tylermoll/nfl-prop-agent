@@ -7,6 +7,8 @@ shadow observations; it has no network or transaction API.
 from __future__ import annotations
 
 import hashlib
+import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +25,38 @@ from app.modeling.live import FootballArtifactScorer
 from app.models import Side
 from app.scheduler import DueCapture, SchedulerConfig, freshness_metadata
 from app.shadow import make_observation
+
+logger = logging.getLogger(__name__)
+
+
+class IdentityResolutionError(ValueError):
+    """A safe, deterministic rejection of one provider prop identity."""
+
+    non_retryable = True
+
+    def __init__(self, stage: str, message: str, diagnostics: dict[str, Any]):
+        super().__init__(message)
+        self.identity_stage = stage
+        self.diagnostics = {**diagnostics, "identity_stage": stage}
+
+
+class ObservationBuildResult(list):
+    """Observations plus safe per-prop rejections for scheduler reporting."""
+
+    def __init__(self, rows: list[dict], rejected_props: list[dict[str, Any]]):
+        super().__init__(rows)
+        self.rejected_props = rejected_props
+
+
+def _safe_text(value: Any, limit: int = 160) -> str | None:
+    if not isinstance(value, str):
+        return None
+    # Provider identifiers and names are useful operational metadata, but must
+    # never be allowed to inject multiline payloads or credential-like values.
+    value = re.sub(r"[\x00-\x1f\x7f]+", " ", value).strip()
+    value = re.sub(r"(?i)(api[_-]?key|token|authorization|password|credential)\s*[=:]\s*\S+",
+                   r"\1=[REDACTED]", value)
+    return value[:limit] or None
 
 
 @dataclass(frozen=True)
@@ -112,15 +146,39 @@ class CurrentFeatureCache:
             raise ValueError("feature cache contains information timestamped at/after kickoff")
 
     def row(self, quote: Any, capture: DueCapture, required_features: list[str], now: datetime):
+        market = quote.market_type.value
         event = canonical_event_identity(quote.away_team, quote.home_team)
+        base = {"provider_event_id": _safe_text(getattr(quote, "game_id", None)),
+                "canonical_event": event,
+                "provider_player_name": _safe_text(getattr(quote, "player_name", None)),
+                "provider_player_identifier": _safe_text(getattr(quote, "source_market_id", None)),
+                "candidate_stable_ids": [], "candidate_feature_row_count": 0,
+                "canonical_market": market}
+        if getattr(quote, "game_id", None) != capture.event_id:
+            raise IdentityResolutionError("provider_event", "provider event does not match scheduled event", base)
         if event is None:
-            raise ValueError("provider event identity cannot be established")
-        mask = ((self.rows._event == event) & (self.rows._player == normalize_player_name(quote.player_name)) &
-                (self.rows.canonical_market == quote.market_type.value) &
-                (self.rows._kickoff == capture.kickoff_utc))
-        selected = self.rows.loc[mask]
+            raise IdentityResolutionError("canonical_event", "provider event identity cannot be established", base)
+
+        # Resolve the provider name to a stable ID first, within the exact game.
+        # Do not let market availability influence player identity and never
+        # search another kickoff or matchup as a fallback.
+        game_rows = self.rows.loc[(self.rows._event == event) &
+                                  (self.rows._kickoff == capture.kickoff_utc)]
+        if game_rows.empty:
+            raise IdentityResolutionError("current_game", "no current-feature rows for the exact game", base)
+        name_rows = game_rows.loc[game_rows._player == normalize_player_name(quote.player_name)]
+        stable_ids = sorted(set(name_rows.player_id.astype(str)))
+        base["candidate_stable_ids"] = stable_ids
+        base["candidate_feature_row_count"] = int(
+            (name_rows.canonical_market == market).sum())
+        if len(stable_ids) != 1:
+            raise IdentityResolutionError("stable_player", "stable player identity is missing or ambiguous", base)
+        selected = game_rows.loc[(game_rows.player_id.astype(str) == stable_ids[0]) &
+                                 (game_rows.canonical_market == market)]
+        base["candidate_feature_row_count"] = int(len(selected))
         if len(selected) != 1:
-            raise ValueError("stable player/current-game feature identity is missing or ambiguous")
+            raise IdentityResolutionError("current_feature_row",
+                "current-game feature row is missing or ambiguous", base)
         item = selected.iloc[0]
         missing = [feature for feature in required_features if feature not in self.rows]
         if missing:
@@ -186,11 +244,16 @@ def create_scheduler_pipeline():
             feature_cache = CurrentFeatureCache(settings.football_current_feature_path)
         hardrock = [r for r in rows if r.source == settings.the_odds_api_target_bookmaker and
                     r.line is not None and r.american_odds is not None and r.side in (Side.OVER, Side.UNDER)]
-        output = []
+        output, rejected = [], []
         for quote in hardrock:
             market = quote.market_type.value
             scorer = models.scorers[market]
-            features, identity = feature_cache.row(quote, capture, scorer.artifact["features"], now)
+            try:
+                features, identity = feature_cache.row(quote, capture, scorer.artifact["features"], now)
+            except IdentityResolutionError as exc:
+                rejected.append(exc.diagnostics)
+                logger.warning("Rejecting unresolved Hard Rock prop: %s", exc.diagnostics)
+                continue
             built = identity._built.to_pydatetime()
             score = scorer.score(features, quote.line, built)
             reference = _reference_context(rows, quote, settings.the_odds_api_target_bookmaker)
@@ -209,6 +272,9 @@ def create_scheduler_pipeline():
                 context={"capture_slot": capture.slot, "capture_target_time_utc": capture.target_time_utc.isoformat(),
                          "feature_data_as_of_utc": identity._asof.isoformat(),
                          "artifact_provenance": models.provenance[market]}))
-        return output
+        if not output and rejected:
+            raise IdentityResolutionError("event_props", "all eligible Hard Rock props failed deterministic identity resolution",
+                                          {"rejected_props": rejected})
+        return ObservationBuildResult(output, rejected)
 
     return model_loader, observation_builder

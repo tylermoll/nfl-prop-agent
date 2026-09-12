@@ -6,6 +6,7 @@ import pytest
 
 from app.scheduler import (DEFAULT_WINDOWS, CaptureWindow, SchedulerConfig, SnapshotScheduler,
                            due_captures, freshness_metadata, sanitized_error)
+from app.production_pipeline import IdentityResolutionError, ObservationBuildResult
 
 NOW = datetime(2026, 9, 11, 12, tzinfo=timezone.utc)
 
@@ -108,6 +109,39 @@ def test_failed_slot_report_is_categorized_costed_sanitized_and_persisted():
     assert "super-secret" not in failure["reason"] and "private.invalid" not in failure["reason"]
     assert store.states[("paid-event", "24h", NOW)]["status"] == "failed"
     assert store.executions[0]["details"]["failed"] == [failure]
+
+
+def test_deterministic_identity_failure_is_non_retryable_without_second_paid_request():
+    odds, store, kalshi = Odds([event("24h")]), Store(), Kalshi()
+    error = IdentityResolutionError("stable_player", "stable player identity is missing",
+        {"provider_event_id": "g", "canonical_event": "nfl:buf:mia",
+         "provider_player_name": "Exact Player", "provider_player_identifier": "safe-id",
+         "candidate_stable_ids": [], "candidate_feature_row_count": 0,
+         "canonical_market": "player_pass_yds"})
+    scheduler = SnapshotScheduler(odds=odds, store=store, kalshi=kalshi, load_model=lambda: object(),
+        build_observations=lambda *_: (_ for _ in ()).throw(error), now=lambda: NOW)
+    first = asyncio.run(scheduler.run())
+    second = asyncio.run(scheduler.run())
+    assert first["failed"][0]["retryable"] is False
+    assert first["failed"][0]["identity_stage"] == "stable_player"
+    assert first["failed"][0]["identity_diagnostics"]["candidate_stable_ids"] == []
+    assert not second["selected"]
+    assert odds.targeted == ["g"] and odds.usage["quota_consumed"] == 3
+
+
+def test_partial_prop_rejection_completes_slot_and_persists_valid_observation():
+    odds, store, kalshi = Odds([event("24h")]), Store(), Kalshi()
+    rejected = {"provider_event_id": "g", "canonical_event": "nfl:buf:mia",
+        "provider_player_name": "Unknown", "provider_player_identifier": "safe-id",
+        "candidate_stable_ids": [], "candidate_feature_row_count": 0,
+        "canonical_market": "player_pass_yds", "identity_stage": "stable_player"}
+    scheduler = SnapshotScheduler(odds=odds, store=store, kalshi=kalshi, load_model=lambda: object(),
+        build_observations=lambda *_: ObservationBuildResult([{"row": 1}], [rejected]), now=lambda: NOW)
+    first = asyncio.run(scheduler.run())
+    second = asyncio.run(scheduler.run())
+    assert first["completed"] and store.observations == [{"row": 1}]
+    assert first["rejected_props"] == [rejected]
+    assert not second["selected"] and odds.targeted == ["g"]
 
 def test_failed_slot_retries_paid_request_until_budget_then_stops():
     odds, store, kalshi = Odds([event("24h")]), Store(), Kalshi()
