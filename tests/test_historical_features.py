@@ -46,7 +46,8 @@ def test_opponent_allowed_uses_only_prior_games():
 
 def test_injury_and_depth_are_strictly_asof_and_not_backfilled():
     weekly, schedules = fixtures()
-    kickoff3 = pd.Timestamp("2023-09-15 18:00", tz="UTC")
+    # nflverse's 18:00 is an Eastern wall-clock value (EDT on this date).
+    kickoff3 = pd.Timestamp("2023-09-15 22:00", tz="UTC")
     injuries = pd.DataFrame([
         {"player_id": "qb1", "observed_at": kickoff3 - pd.Timedelta("1h"), "injury_status": "questionable"},
         {"player_id": "qb1", "observed_at": kickoff3 + pd.Timedelta("1h"), "injury_status": "out"},

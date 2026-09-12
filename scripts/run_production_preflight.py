@@ -20,6 +20,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 
 from app.config import settings
 from app.current_features import validate_current_rows
+from app.identities import canonical_event_identity
 from app.modeling.benchmark import MARKETS
 from app.production_pipeline import CurrentFeatureCache, ProductionModels, load_production_models
 from app.providers.the_odds_api import TheOddsApiProvider, _parse_datetime
@@ -105,7 +106,44 @@ def _database_check(engine_factory: Callable[..., Any]) -> dict[str, Any]:
         engine.dispose()
 
 
-async def _live_props(provider_factory: Callable[..., Any], now: datetime) -> dict[str, Any]:
+def _kickoff_crosscheck(events: list[dict[str, Any]], future: pd.DataFrame,
+                        tolerance_seconds: float = 300) -> dict[str, Any]:
+    """Compare matched nflverse feature games with provider UTC commence times."""
+    provider_games: dict[str, datetime] = {}
+    for event in events:
+        identity = canonical_event_identity(event.get("away_team"), event.get("home_team"))
+        kickoff = _parse_datetime(event.get("commence_time"))
+        if identity and kickoff:
+            provider_games[identity] = kickoff.astimezone(timezone.utc)
+
+    feature_games = (future[["_event", "_kickoff"]].drop_duplicates()
+                     if not future.empty else pd.DataFrame(columns=["_event", "_kickoff"]))
+    comparisons = []
+    for row in feature_games.to_dict("records"):
+        if row["_event"] not in provider_games:
+            continue
+        feature_kickoff = pd.Timestamp(row["_kickoff"]).to_pydatetime().astimezone(timezone.utc)
+        provider_kickoff = provider_games[row["_event"]]
+        delta = abs((feature_kickoff - provider_kickoff).total_seconds())
+        comparisons.append({"event_identity": row["_event"],
+                            "current_feature_kickoff_utc": feature_kickoff.isoformat(),
+                            "provider_commence_time_utc": provider_kickoff.isoformat(),
+                            "absolute_difference_seconds": delta})
+    mismatches = [item for item in comparisons
+                  if item["absolute_difference_seconds"] > tolerance_seconds]
+    if mismatches:
+        status, reasons = "failed", ["matched nflverse/current-feature and provider kickoffs materially differ"]
+    elif not comparisons:
+        status, reasons = "warning", ["no provider events could be matched to current-feature team pairs"]
+    else:
+        status, reasons = "passed", []
+    return _check("live_event_kickoff_crosscheck", status,
+                  tolerance_seconds=tolerance_seconds, matched_event_count=len(comparisons),
+                  material_mismatch_count=len(mismatches), comparisons=comparisons, reasons=reasons)
+
+
+async def _live_props(provider_factory: Callable[..., Any], now: datetime,
+                      future: pd.DataFrame) -> tuple[dict[str, Any], dict[str, Any]]:
     provider = provider_factory(bookmakers=(settings.the_odds_api_target_bookmaker,))
     events = await provider.discover_events()
     end = now.timestamp() + settings.the_odds_api_lookahead_days * 86400
@@ -127,13 +165,14 @@ async def _live_props(provider_factory: Callable[..., Any], now: datetime) -> di
     events_with_props = len({row.game_id for row in rows
                              if row.source == settings.the_odds_api_target_bookmaker})
     ok = bool(upcoming) and found == set(MARKETS)
-    return _check("live_hard_rock_props", "passed" if ok else "failed",
+    props = _check("live_hard_rock_props", "passed" if ok else "failed",
                   upcoming_event_count=len(upcoming), events_checked=checked,
                   bookmaker=settings.the_odds_api_target_bookmaker,
                   bookmaker_count=int(bool(rows)), events_with_hard_rock_props=events_with_props,
                   market_row_counts=counts, markets_available=sorted(found),
                   quota_usage=dict(provider.usage),
                   reasons=[] if ok else ["upcoming Hard Rock props were not available for all canonical markets"])
+    return props, _kickoff_crosscheck(upcoming, future)
 
 
 async def run_preflight(*, check_live_props: bool = False, now: datetime | None = None,
@@ -229,9 +268,12 @@ async def run_preflight(*, check_live_props: bool = False, now: datetime | None 
 
     if check_live_props:
         try:
-            report["checks"].append(await _live_props(odds_provider_factory, current))
+            props, kickoff_crosscheck = await _live_props(odds_provider_factory, current, future)
+            report["checks"].extend((props, kickoff_crosscheck))
         except Exception as exc:
             report["checks"].append(_check("live_hard_rock_props", "failed", reasons=[sanitized_error(exc)]))
+            report["checks"].append(_check("live_event_kickoff_crosscheck", "failed",
+                                           reasons=["live event kickoff comparison could not be completed"]))
     else:
         report["checks"].append(_check("live_hard_rock_props", "skipped",
                                        reasons=["use --check-live-props to opt in; no provider request was made"]))
