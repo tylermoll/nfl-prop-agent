@@ -19,6 +19,7 @@ from app.production_pipeline import ProductionModels, load_production_models
 
 IDENTITY = ["player_id", "player_name", "home_team", "away_team", "kickoff",
             "canonical_market", "feature_built_at_utc", "feature_data_as_of_utc"]
+HISTORY_SEASONS = 3
 
 
 @dataclass
@@ -28,6 +29,10 @@ class BuildReport:
     upcoming_games_found: int = 0
     player_rows_by_market: dict[str, int] = field(default_factory=dict)
     excluded_players: list[dict[str, str]] = field(default_factory=list)
+    player_history_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    history_seasons_requested: list[int] = field(default_factory=list)
+    history_seasons_used: list[int] = field(default_factory=list)
+    history_rows_used: int = 0
     artifact_schema_validation: str = "not run"
     output_path: str = ""
     output_row_count: int = 0
@@ -107,13 +112,22 @@ def build_current_features(output: str | Path, *, dry_run: bool = False,
     if upcoming.empty:
         raise ValueError("no upcoming NFL games found")
     season = int(upcoming.season.iloc[0])
-    weekly = normalize_weekly(client.fetch("weekly_stats", season, refresh=True))
+    # Eight observations is the longest player window. Three bounded NFL
+    # seasons accommodates sparse participation without fetching the full
+    # historical universe; every observation is still cutoff by kickoff.
+    history_seasons = list(range(season - HISTORY_SEASONS + 1, season + 1))
+    report.history_seasons_requested = history_seasons
+    weekly_parts = [normalize_weekly(client.fetch("weekly_stats", year, refresh=True))
+                    for year in history_seasons]
+    weekly = pd.concat(weekly_parts, ignore_index=True, sort=False)
     weekly["player_id"] = weekly.player_id.astype(str).str.strip()
-    completed_games = schedules[(schedules.season == season) & (schedules.kickoff < now)]
+    completed_games = schedules[(schedules.season.isin(history_seasons)) & (schedules.kickoff < now)]
     completed_keys = completed_games[["season", "week"]].drop_duplicates()
     historical = weekly.merge(completed_keys, on=["season", "week"], how="inner")
-    if completed_games.empty:
-        raise ValueError("no completed prior games available for the current season")
+    if historical.empty:
+        raise ValueError("no completed historical NFL participation available before kickoff")
+    report.history_rows_used = int(len(historical))
+    report.history_seasons_used = sorted(int(value) for value in historical.season.unique())
     cutoff = completed_games.kickoff.max()
     report.source_cutoff_timestamp = cutoff.isoformat()
     rosters = _roster_columns(client.fetch("rosters", season, refresh=True))
@@ -127,12 +141,24 @@ def build_current_features(output: str | Path, *, dry_run: bool = False,
                 markets = allowed.get(str(player.position).upper(), ())
                 if not pid or not markets:
                     if not pid:
-                        report.excluded_players.append({"player_name": str(player.player_name), "reason": "missing stable player ID"})
+                        reason = "roster/player identity mismatch: missing stable player ID"
+                    else:
+                        reason = "unsupported position"
+                    report.excluded_players.append({"player_name": str(player.player_name), "reason": reason})
                     continue
                 if pid not in history_by_player.groups:
-                    report.excluded_players.append({"player_name": str(player.player_name), "reason": "no completed prior-game history"})
+                    report.excluded_players.append({"player_name": str(player.player_name), "reason": "no historical NFL participation"})
+                    report.player_history_diagnostics.append({"player_id": pid, "player_name": str(player.player_name),
+                        "status": "no historical participation", "history_rows": 0, "history_seasons": []})
                     continue
                 prior = historical.loc[history_by_player.groups[pid]]
+                prior_seasons = sorted(int(value) for value in prior.season.unique())
+                has_current = season in prior_seasons
+                report.player_history_diagnostics.append({"player_id": pid, "player_name": str(player.player_name),
+                    "status": ("current and prior-season history successfully used" if has_current and len(prior_seasons) > 1
+                               else "current-season history available" if has_current
+                               else "no current-season history; prior-season history successfully used"),
+                    "history_rows": int(len(prior)), "history_seasons": prior_seasons})
                 for market in markets:
                     target = MARKETS[market]
                     participated = (pd.to_numeric(prior.get("attempts"), errors="coerce").fillna(0) > 0).any() if market == "player_pass_yds" else ((pd.to_numeric(prior.get("targets"), errors="coerce").fillna(0) > 0) | (pd.to_numeric(prior.get("receptions"), errors="coerce").fillna(0) > 0)).any()
@@ -145,7 +171,7 @@ def build_current_features(output: str | Path, *, dry_run: bool = False,
         raise ValueError("no eligible current players found")
     historical["_current_target"] = False
     combined = pd.concat([historical, pd.DataFrame(synthetic)], ignore_index=True, sort=False)
-    relevant_schedules = pd.concat([completed_games, upcoming], ignore_index=True)
+    relevant_schedules = pd.concat([completed_games, upcoming], ignore_index=True).drop_duplicates("game_id")
     table = build_modeling_table(combined, relevant_schedules, current_row_column="_current_target")
     current = table[table._current_target.fillna(False)].copy()
     current = current[current.apply(lambda r: r.canonical_market == r._requested_market, axis=1)]

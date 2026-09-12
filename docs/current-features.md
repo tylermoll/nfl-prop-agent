@@ -1,13 +1,19 @@
 # Production current pregame features
 
 The materializer downloads only the maintained nflverse schedules, weekly
-player statistics, and current-season roster Parquet releases. It does not use
+player statistics for the target season and two preceding seasons, and the
+current-season roster Parquet release. It does not use
 any sportsbook, market, Kalshi, credential, line, or price endpoint. It selects
 the next scheduled NFL week, admits roster players with stable GSIS IDs and
-completed current-season participation, and appends outcome-empty target rows
+completed NFL participation in the bounded history window, and appends outcome-empty target rows
 to `app.historical.features.build_modeling_table`. Thus current rows use the
 benchmark's exact shifted/rolling definitions rather than a parallel feature
-implementation.
+implementation. Previous-game, rolling 3/5/8, usage, role-change, and opponent
+history cross a season boundary because their training transforms group by
+stable player/team identity. Season-to-date statistics and team rest reset by
+season, so Week 1 has no season-to-date value and no artificial offseason rest.
+All source games must be completed before the build time (which is strictly
+before every target kickoff); released future or target-game rows are ignored.
 
 Run it on Railway with the model artifact environment variables and output all
 pointing into the same mounted volume:
@@ -28,5 +34,6 @@ then every 6 hours through the active slate (plus immediately after completed
 games are published). This captures changing completed-game usage while the
 strict cutoff and timestamps remain before each target kickoff. Daily refreshes
 are sufficient in the offseason. The JSON report records retrieval/cutoff
-times, slate and row counts, exclusions, schema status, destination, and run
-time without printing source URLs.
+times, requested/used history seasons and row counts, per-player history status,
+exclusions, schema status, destination, and run time without printing source
+URLs.

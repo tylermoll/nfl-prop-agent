@@ -35,9 +35,14 @@ def _lag_features(rows: pd.DataFrame) -> pd.DataFrame:
             lambda series: series.rolling(window, min_periods=1).mean())
         rows[f"rolling_{window}_std"] = lagged_target.groupby([rows[k] for k in keys]).transform(
             lambda series: series.rolling(window, min_periods=2).std())
-    season_keys = [rows["player_id"], rows["canonical_market"], rows["season"]]
-    rows["season_to_date_mean"] = lagged_target.groupby(season_keys).transform(lambda s: s.expanding(1).mean())
-    rows["season_to_date_std"] = lagged_target.groupby(season_keys).transform(lambda s: s.expanding(2).std())
+    season_keys = ["player_id", "canonical_market", "season"]
+    # Unlike the rolling features, season-to-date is based on a shift within
+    # the season.  Shifting before adding season to the grouping keys would
+    # incorrectly make Week 1 inherit the previous season's final game.
+    season_lag = rows.groupby(season_keys, sort=False, dropna=False)["actual_value"].shift(1)
+    season_groups = [rows[k] for k in season_keys]
+    rows["season_to_date_mean"] = season_lag.groupby(season_groups).transform(lambda s: s.expanding(1).mean())
+    rows["season_to_date_std"] = season_lag.groupby(season_groups).transform(lambda s: s.expanding(2).std())
     return rows
 
 
@@ -122,7 +127,10 @@ def build_modeling_table(weekly: pd.DataFrame, schedules: pd.DataFrame, *, snaps
     # Rest uses the team's preceding scheduled appearance, never a later game.
     team_games = pd.concat([games[["game_id", "kickoff", "home_team"]].rename(columns={"home_team": "team"}),
                             games[["game_id", "kickoff", "away_team"]].rename(columns={"away_team": "team"})]).sort_values("kickoff")
-    team_games["days_rest"] = team_games.groupby("team")["kickoff"].diff().dt.total_seconds().div(86400)
+    # Training defines rest within an NFL season; an offseason is not a
+    # meaningful rest interval and must not become a live-only value.
+    team_games = team_games.merge(games[["game_id", "season"]], on="game_id", how="left")
+    team_games["days_rest"] = team_games.groupby(["team", "season"])["kickoff"].diff().dt.total_seconds().div(86400)
     joined = joined.merge(team_games[["game_id", "team", "days_rest"]], on=["game_id", "team"], how="left")
     rows = pd.concat([joined.assign(canonical_market=market, actual_value=joined[target]) for market, target in MARKETS.items()], ignore_index=True)
     applicable = ((rows.canonical_market == "player_pass_yds") & (rows.attempts > 0)) | ((rows.canonical_market != "player_pass_yds") & ((rows.targets > 0) | (rows.receptions > 0)))

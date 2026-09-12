@@ -77,3 +77,28 @@ def test_output_has_three_realized_statistic_targets():
     assert wr.loc["player_reception_yds", "actual_value"] == 100
     assert wr.loc["player_receptions", "actual_value"] == 2
     assert not any("odds" in column or "kalshi" in column for column in rows)
+
+
+def test_cross_season_windows_continue_but_season_to_date_and_rest_reset():
+    weekly = pd.DataFrame([
+        {"season": 2025, "week": 17, "player_id": "qb1", "player_name": "Q", "team": "KC", "attempts": 20, "passing_yards": 100},
+        {"season": 2025, "week": 18, "player_id": "qb1", "player_name": "Q", "team": "KC", "attempts": 30, "passing_yards": 200},
+        {"season": 2026, "week": 1, "player_id": "qb1", "player_name": "Q", "team": "KC", "attempts": 40, "passing_yards": 300},
+        {"season": 2026, "week": 2, "player_id": "qb1", "player_name": "Q", "team": "KC", "attempts": 50, "passing_yards": 400},
+    ])
+    schedules = pd.DataFrame([
+        {"season": 2025, "week": 17, "game_id": "a", "home_team": "KC", "away_team": "BUF", "gameday": "2025-12-28"},
+        {"season": 2025, "week": 18, "game_id": "b", "home_team": "KC", "away_team": "BUF", "gameday": "2026-01-04"},
+        {"season": 2026, "week": 1, "game_id": "c", "home_team": "KC", "away_team": "BUF", "gameday": "2026-09-06"},
+        {"season": 2026, "week": 2, "game_id": "d", "home_team": "KC", "away_team": "BUF", "gameday": "2026-09-13"},
+    ])
+    rows = select(build_modeling_table(weekly, schedules))
+    week1 = rows[(rows.season == 2026) & (rows.week == 1)].iloc[0]
+    week2 = rows[(rows.season == 2026) & (rows.week == 2)].iloc[0]
+    assert week1.previous_game_value == 200
+    assert week1.rolling_3_mean == pytest.approx(150)
+    assert pd.isna(week1.season_to_date_mean)
+    assert pd.isna(week1.days_rest)
+    assert week1.pregame_attempts == 30
+    assert week2.season_to_date_mean == 300
+    assert week2.days_rest == pytest.approx(7)
