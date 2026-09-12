@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     scheduler_retry_budget: int = 2
     scheduler_provider_stale_seconds: int = 300
     scheduler_model_stale_seconds: int = 3600
+    football_artifact_player_pass_yds: str | None = None
+    football_artifact_player_reception_yds: str | None = None
+    football_artifact_player_receptions: str | None = None
+    # A separately refreshed, pregame-only table. Bulk nflverse data and model
+    # artifacts are deployment inputs, not files downloaded by the scheduler.
+    football_current_feature_path: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

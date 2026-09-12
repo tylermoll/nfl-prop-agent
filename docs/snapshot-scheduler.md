@@ -87,15 +87,34 @@ URLs and raw secrets are not stored.
 # No event props, Kalshi calls, observations, slot states, or execution row.
 python -m scripts.run_snapshot_scheduler --dry-run
 
-# Live collection requires an application-specific integration factory. It
-# returns (shared_model_loader, observation_builder).
-python -m scripts.run_snapshot_scheduler --pipeline myapp.snapshot:factory
+# Production collection uses the repository's local-artifact integration.
+python -m scripts.run_snapshot_scheduler --pipeline app.production_pipeline:create_scheduler_pipeline
 ```
 
-The integration factory is explicit because current-game football features
-must come from a deployment's versioned data pipeline; the scheduler does not
-invent them. Configure it with environment-backed settings, store credentials
-in a secret manager, and use PostgreSQL shared by all invocations.
+The production factory loads all three artifacts exactly once and never
+downloads or trains during an execution. Configure
+`FOOTBALL_ARTIFACT_PLAYER_PASS_YDS`,
+`FOOTBALL_ARTIFACT_PLAYER_RECEPTION_YDS`, and
+`FOOTBALL_ARTIFACT_PLAYER_RECEPTIONS` as absolute paths. Configure
+`FOOTBALL_CURRENT_FEATURE_PATH` as a Parquet (preferred), JSON, or CSV table.
+That table is an explicit deployment input, refreshed before scheduler runs
+from nflverse/current sources by a separate job. It contains one row per
+current player/game/market, stable `player_id`, `player_name`, `home_team`,
+`away_team`, `kickoff`, `canonical_market`, `feature_built_at_utc`, and
+`feature_data_as_of_utc`, plus the artifact-required columns produced with the
+definitions in `app.historical.features`. Current-game result/usage columns
+must not be present. The adapter verifies exact artifact schema, exact player
+and matchup identity, and that both timestamps precede kickoff and capture.
+
+For Railway, the simplest reliable current deployment is one persistent
+volume mounted read-only by the scheduler (for example at `/models`) containing
+the three immutable artifacts and an atomically replaced feature-cache file.
+A separate explicit data/model release job uploads versioned files to that
+volume; the scheduler must never generate them. Baking models into the image is
+also reproducible but makes feature refreshes require an image deployment;
+ephemeral runtime downloads are not recommended. Do not commit artifacts,
+bulk data, API keys, or private keys. Store provider/database credentials as
+Railway secrets and the four local paths as Railway variables.
 
 Recommended automation is a five-minute cron or systemd timer on an always-on
 worker. Alternatives are a hosted worker/platform cron or GitHub Actions
