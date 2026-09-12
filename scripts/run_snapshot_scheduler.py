@@ -19,11 +19,11 @@ def _pipeline(spec: str | None):
     module, function = spec.split(":", 1)
     return getattr(importlib.import_module(module), function)()
 
-async def main() -> int:
-    args = parser().parse_args()
-    if not args.dry_run and not args.pipeline:
-        parser().error("live mode requires --pipeline module:function for repository-specific current features")
-    loader, builder = _pipeline(args.pipeline)
+async def run_scheduler(*, dry_run: bool = False, pipeline: str | None = None) -> dict:
+    """Build and run one scheduler without owning CLI output or process exit."""
+    if not dry_run and not pipeline:
+        raise ValueError("live mode requires --pipeline module:function for repository-specific current features")
+    loader, builder = _pipeline(pipeline)
     windows = tuple(CaptureWindow(f"{m//60}h" if m >= 60 and m % 60 == 0 else f"{m}m",
         timedelta(minutes=m), timedelta(minutes=settings.scheduler_tolerance_minutes)) for m in settings.scheduler_slots_minutes)
     final = None if settings.scheduler_final_capture_minutes is None else CaptureWindow("final",
@@ -36,7 +36,13 @@ async def main() -> int:
         model_stale_after=timedelta(seconds=settings.scheduler_model_stale_seconds))
     scheduler = SnapshotScheduler(odds=TheOddsApiProvider(), store=ShadowStore(settings.database_url),
         kalshi=KalshiProvider(fetch_order_books=False), load_model=loader, build_observations=builder, config=config)
-    print(json.dumps(await scheduler.run(dry_run=args.dry_run), indent=2, default=str))
+    return await scheduler.run(dry_run=dry_run)
+
+async def main() -> int:
+    args = parser().parse_args()
+    if not args.dry_run and not args.pipeline:
+        parser().error("live mode requires --pipeline module:function for repository-specific current features")
+    print(json.dumps(await run_scheduler(dry_run=args.dry_run, pipeline=args.pipeline), indent=2, default=str))
     return 0
 
 if __name__ == "__main__": raise SystemExit(asyncio.run(main()))

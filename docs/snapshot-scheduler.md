@@ -122,3 +122,18 @@ worker. Alternatives are a hosted worker/platform cron or GitHub Actions
 example ±15 minutes), concurrency locking, and a durable external PostgreSQL
 database. Database slot uniqueness provides the final idempotency guard when
 workers overlap. Never enable Kalshi order-book depth for this workflow.
+# Production cycle
+
+Railway should run the scheduler service every five minutes with:
+
+```bash
+python -m scripts.run_production_cycle
+```
+
+Set `FOOTBALL_CURRENT_FEATURE_PATH=/models/current_features.parquet` and optionally
+override `FOOTBALL_CURRENT_FEATURE_MAX_AGE_SECONDS=21600` (six hours). The cycle
+holds a nonblocking advisory `flock` on
+`/models/.current_features.parquet.production-cycle.lock` from the freshness check
+through scheduler completion. An overlapping invocation exits nonzero. Only a
+missing or stale cache invokes the existing nflverse current-feature materializer;
+its atomic replacement remains responsible for preserving a prior valid cache.

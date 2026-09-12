@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # A separately refreshed, pregame-only table. Bulk nflverse data and model
     # artifacts are deployment inputs, not files downloaded by the scheduler.
     football_current_feature_path: str | None = None
+    # Railway's five-minute cycle reuses this cache until it reaches this age.
+    football_current_feature_max_age_seconds: int = 21600
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
