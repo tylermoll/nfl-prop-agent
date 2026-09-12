@@ -1,0 +1,148 @@
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+import pytest
+from sqlalchemy import func, insert, select
+
+from app.research import ResearchRepository
+from app.settlement import SettlementCycle
+from app.shadow_storage import ShadowStore, observations, settlements
+
+NOW = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+KICKOFF = datetime(2026, 9, 13, 20, tzinfo=timezone.utc)
+
+
+def observation(identifier="o1", *, market="player_pass_yds", side="over", line=249.5,
+                odds=-110, player="p1", game="provider-event", kickoff=KICKOFF):
+    return {"observation_id": identifier, "observed_at_utc": kickoff-timedelta(hours=1),
+        "kickoff_utc": kickoff, "game_id": game, "player_id": player, "player_name": "Exact Player",
+        "team": "BUF", "opponent": "MIA", "canonical_market": market, "line": line, "side": side,
+        "hard_rock_offered_odds": odds, "offered_price_break_even_probability": .52,
+        "model_probability": .55, "model_version": "fixed", "raw_probability_edge_pp": 3,
+        "hypothetical_expected_return_per_dollar": .05, "edge_bucket": "edge_2_to_5pp",
+        "feature_built_at_utc": kickoff-timedelta(hours=2), "uncertainty_method": "fixed",
+        "uncertainty_version": "v1", "residual_bucket": None, "uncertainty_scale": None,
+        "point_prediction": 250, "reference_context": {}, "kalshi_context": {},
+        "source_observation_ids": {}, "freshness": {}, "context": {},
+        "confirmation_flags": {}, "research_config": {"nominal_unit": 10}}
+
+
+class FootballOnly:
+    def __init__(self, *, final=True, stats=True, weekly=None, game_id="nfl-game"):
+        self.calls = []
+        self.schedules = pd.DataFrame([{"season": 2026, "week": 1, "game_id": game_id,
+            "home_team": "BUF", "away_team": "MIA", "gameday": "2026-09-13",
+            "gametime": "20:00", "result": "BUF 27 - MIA 20" if final else None}])
+        self.weekly = weekly if weekly is not None else pd.DataFrame([{"season": 2026, "week": 1,
+            "game_id": game_id, "player_id": "p1", "player_name": "Exact Player", "team": "BUF",
+            "passing_yards": 260 if stats else None, "receiving_yards": 80 if stats else None,
+            "receptions": 6 if stats else None}])
+
+    def fetch(self, dataset, season=None, *, refresh=False):
+        assert dataset in {"schedules", "weekly_stats"}  # no market provider is reachable here
+        self.calls.append((dataset, season, refresh))
+        return (self.schedules if dataset == "schedules" else self.weekly).copy()
+
+
+@pytest.fixture
+def store(tmp_path):
+    return ShadowStore(f"sqlite:///{tmp_path/'settlement.db'}")
+
+
+def run(store, client):
+    return SettlementCycle(store=store, nflverse=client, now=lambda: NOW).run()
+
+
+def add(store, *rows):
+    for row in rows:
+        store.append(row)
+
+
+def settlement_rows(store):
+    with store.engine.connect() as connection:
+        return [dict(r._mapping) for r in connection.execute(select(settlements))]
+
+
+def test_final_available_settles_and_dashboard_reflects_immediately(store):
+    add(store, observation())
+    report = run(store, FootballOnly())
+    assert (report["observations_settled"], report["wins"], report["paper_profit_loss"]) == (1, 1, pytest.approx(9.090909))
+    detail = ResearchRepository(engine=store.engine).observation("o1")
+    assert detail["settlement_status"] == "settled" and detail["settlement"]["actual_value"] == 260
+
+
+def test_nonfinal_game_remains_unsettled_and_does_not_fetch_weekly(store):
+    add(store, observation())
+    client = FootballOnly(final=False)
+    report = run(store, client)
+    assert report["games_final"] == 0 and not settlement_rows(store)
+    assert [call[0] for call in client.calls] == ["schedules"]
+
+
+def test_final_missing_result_is_retryable_and_never_zero(store):
+    add(store, observation())
+    report = run(store, FootballOnly(stats=False))
+    assert report["games_results_not_available"] == 1 and not settlement_rows(store)
+    assert any(error["kind"] == "result_not_available" for error in report["errors"])
+
+
+@pytest.mark.parametrize("mutation", ["player", "event"])
+def test_exact_identity_is_enforced(store, mutation):
+    row = observation(player="different") if mutation == "player" else observation(kickoff=KICKOFF+timedelta(minutes=1))
+    add(store, row)
+    report = run(store, FootballOnly())
+    assert not settlement_rows(store)
+    expected = "result_not_available" if mutation == "player" else "event_identity_not_exact"
+    assert any(e["kind"] == expected for e in report["errors"])
+
+
+@pytest.mark.parametrize(("market", "actual"), [
+    ("player_pass_yds", 260), ("player_reception_yds", 80), ("player_receptions", 6)])
+def test_all_canonical_markets(store, market, actual):
+    add(store, observation(market=market, line=actual-1))
+    report = run(store, FootballOnly())
+    assert report["wins"] == 1 and settlement_rows(store)[0]["actual_value"] == actual
+
+
+@pytest.mark.parametrize(("identifier", "side", "line", "odds", "result", "pnl"), [
+    ("win", "over", 250, 150, "win", 15),
+    ("loss", "under", 250, -110, "loss", -10),
+    ("push", "over", 260, 120, "push", 0),
+    ("negative-price-win", "over", 250, -200, "win", 5),
+])
+def test_threshold_and_american_price_pnl(store, identifier, side, line, odds, result, pnl):
+    add(store, observation(identifier, side=side, line=line, odds=odds))
+    run(store, FootballOnly())
+    row = settlement_rows(store)[0]
+    assert row["result"] == result and row["fixed_unit_profit_loss"] == pytest.approx(pnl)
+
+
+def test_idempotent_rerun_and_primary_key_duplicate_prevention(store):
+    add(store, observation())
+    first, second = run(store, FootballOnly()), run(store, FootballOnly())
+    assert first["observations_settled"] == 1 and second["observations_settled"] == 0
+    assert second["skipped_already_settled_rows"] == 1 and len(settlement_rows(store)) == 1
+    with pytest.raises(Exception), store.engine.begin() as connection:
+        connection.execute(insert(settlements), settlement_rows(store)[0])
+    assert len(settlement_rows(store)) == 1
+
+
+def test_batch_insert_failure_rolls_back_every_settlement(store, monkeypatch):
+    add(store, observation("o1"), observation("o2", market="player_receptions", line=5))
+    original = store.insert_settlements
+    def partial_then_fail(rows, *, connection=None):
+        original(rows[:1], connection=connection)
+        raise RuntimeError("password=hunter2 https://private.example/payload")
+    monkeypatch.setattr(store, "insert_settlements", partial_then_fail)
+    report = run(store, FootballOnly())
+    assert not settlement_rows(store) and report["settlement_failures"] == 1
+    serialized = str(report)
+    assert "hunter2" not in serialized and "private.example" not in serialized
+    assert "[REDACTED]" in serialized and "[URL REDACTED]" in serialized
+
+
+def test_groups_downloads_by_season_not_observation(store):
+    add(store, observation("o1"), observation("o2", market="player_receptions", line=5))
+    client = FootballOnly()
+    run(store, client)
+    assert client.calls == [("schedules", None, True), ("weekly_stats", 2026, True)]

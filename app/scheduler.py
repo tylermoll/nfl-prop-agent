@@ -71,7 +71,8 @@ def due_captures(events: list[dict[str, Any]], now: datetime, config: SchedulerC
 
 
 def sanitized_error(exc: BaseException) -> str:
-    text = re.sub(r"(?i)(api[_-]?key|token|authorization)=?[^&\s]*", r"\1=[REDACTED]", str(exc))
+    text = re.sub(r"(?i)(api[_-]?key|token|authorization|password|credential)=?[^&\s]*",
+                  r"\1=[REDACTED]", str(exc))
     text = re.sub(r"https?://\S+", "[URL REDACTED]", text)
     return f"{type(exc).__name__}: {text}"[:500]
 

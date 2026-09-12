@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     shadow_starting_bankroll: float = 100
     shadow_nominal_unit: float = 10
     shadow_minimum_report_sample: int = 30
+    settlement_cache_dir: str = "data/historical/raw"
+    settlement_nflverse_refresh: bool = True
     scheduler_slots_minutes: tuple[int, ...] = (1440, 360, 90, 15)
     scheduler_tolerance_minutes: int = 10
     scheduler_final_capture_minutes: int | None = None

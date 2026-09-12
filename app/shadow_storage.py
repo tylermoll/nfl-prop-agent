@@ -100,6 +100,29 @@ class ShadowStore:
     def record_settlement(self, row: dict) -> None:
         with self.engine.begin() as connection: connection.execute(insert(settlements), row)
 
+    def settlement_candidates(self, now: datetime) -> tuple[list[dict], int]:
+        """Return passed-kickoff, unsettled observations and the settled-row count.
+
+        The second value makes retries observable without ever loading or
+        changing the settlement itself.
+        """
+        joined = observations.outerjoin(settlements, observations.c.observation_id == settlements.c.observation_id)
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(observations, settlements.c.observation_id.label("settlement_id"))
+                .select_from(joined).where(observations.c.kickoff_utc < now)).all()
+        unsettled = [dict(row._mapping) for row in rows if row._mapping["settlement_id"] is None]
+        for row in unsettled:
+            row.pop("settlement_id", None)
+        return unsettled, sum(row._mapping["settlement_id"] is not None for row in rows)
+
+    def insert_settlements(self, rows: list[dict], *, connection=None) -> None:
+        """Insert a settlement batch atomically; the PK is the final race guard."""
+        if connection is not None:
+            connection.execute(insert(settlements), rows)
+            return
+        with self.engine.begin() as owned:
+            owned.execute(insert(settlements), rows)
+
     def slot_state(self, event_id: str, slot: str, target_time: datetime) -> dict | None:
         with self.engine.connect() as c:
             row = c.execute(select(scheduler_slots).where(scheduler_slots.c.event_id == event_id,
