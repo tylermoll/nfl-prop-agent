@@ -13,7 +13,9 @@ from sqlalchemy import and_, create_engine, or_, select
 
 from app.config import settings
 from app.research_dashboard import DASHBOARD_HTML
-from app.shadow_storage import normalize_database_url, observations, scheduler_executions, scheduler_slots, settlements
+from app.pregame_context import evaluate_context
+from app.shadow_storage import (normalize_database_url, observations, pregame_context_snapshots,
+                                scheduler_executions, scheduler_slots, settlements)
 
 router = APIRouter(prefix="/research", tags=["research"])
 _SECRET_KEY = re.compile(r"(?i)(secret|password|credential|authorization|api[_-]?key|private[_-]?key|raw[_-]?payload)")
@@ -80,14 +82,35 @@ class ResearchRepository:
         if filters.get("capture_window") is not None:
             query = query.where(observations.c.context["capture_slot"].as_string() == filters["capture_window"])
         with self.engine.connect() as conn:
-            rows = conn.execute(query.limit(limit).offset(offset))
-            return [observation_view(dict(row._mapping), detail=False) for row in rows]
+            rows = list(conn.execute(query.limit(limit).offset(offset)))
+            views = [observation_view(dict(row._mapping), detail=False) for row in rows]
+            return [self._with_context(conn, view) for view in views]
 
     def observation(self, observation_id: str) -> dict | None:
         query = self.observation_query({}).where(observations.c.observation_id == observation_id)
         with self.engine.connect() as conn:
             row = conn.execute(query).first()
-            return observation_view(dict(row._mapping), detail=True) if row else None
+            return self._with_context(conn, observation_view(dict(row._mapping), detail=True)) if row else None
+
+    def _with_context(self, conn, view: dict, as_of: datetime | None = None) -> dict:
+        """Attach the newest append-only snapshot known by ``as_of``."""
+        cutoff = _utc(as_of) or datetime.now(timezone.utc)
+        row = conn.execute(select(pregame_context_snapshots).where(
+            pregame_context_snapshots.c.observation_id == view["observation_id"],
+            pregame_context_snapshots.c.as_of_utc <= cutoff).order_by(
+                pregame_context_snapshots.c.as_of_utc.desc(),
+                pregame_context_snapshots.c.context_id.desc()).limit(1)).first()
+        snapshot = sanitize(dict(row._mapping)) if row else None
+        # evaluate_context returns a new structure and never receives a database row.
+        return {**view, "context_overlay": evaluate_context(view, snapshot, now=cutoff)}
+
+    def context(self, observation_id: str, as_of: datetime | None = None) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(self.observation_query({}).where(
+                observations.c.observation_id == observation_id)).first()
+            if row is None:
+                return None
+            return self._with_context(conn, observation_view(dict(row._mapping), detail=True), as_of)["context_overlay"]
 
     def timeline(self, observation_id: str) -> list[dict] | None:
         """Fetch the complete pregame series for one observation's market identity."""
@@ -241,6 +264,16 @@ def observation_timeline(observation_id: str, repo: ResearchRepository = Depends
     if rows is None:
         raise HTTPException(404, "Observation not found")
     return {"items": rows}
+
+
+@router.get("/observations/{observation_id}/context")
+def observation_context(observation_id: str, as_of: datetime | None = None,
+                        repo: ResearchRepository = Depends(get_repository)):
+    """Context known at ``as_of`` (default now); never refreshes or mutates data."""
+    result = repo.context(observation_id, as_of)
+    if result is None:
+        raise HTTPException(404, "Observation not found")
+    return result
 
 
 @router.get("/summary")

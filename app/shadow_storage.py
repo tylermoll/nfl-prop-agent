@@ -34,6 +34,16 @@ scheduler_slots = Table("shadow_capture_slots", metadata,
 scheduler_executions = Table("shadow_scheduler_executions", metadata,
     Column("execution_id", String(36), primary_key=True), Column("started_at_utc", DateTime(timezone=True), nullable=False),
     Column("ended_at_utc", DateTime(timezone=True)), Column("details", JSON, nullable=False))
+# Context is deliberately append-only and separate from model observations.  An
+# external, independently scheduled collector may insert a new snapshot without
+# changing the probability record it annotates.
+pregame_context_snapshots = Table("pregame_context_snapshots", metadata,
+    Column("context_id", String(36), primary_key=True),
+    Column("observation_id", String(36), nullable=False, index=True),
+    Column("as_of_utc", DateTime(timezone=True), nullable=False, index=True),
+    Column("collected_at_utc", DateTime(timezone=True), nullable=False),
+    Column("weather", JSON, nullable=False), Column("injuries", JSON, nullable=False),
+    Column("role", JSON, nullable=False), Column("sources", JSON, nullable=False))
 
 def normalize_database_url(database_url: str) -> str:
     """Select Psycopg 3 for driverless PostgreSQL URLs.

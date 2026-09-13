@@ -53,3 +53,43 @@ says that metrics will appear after prospective observations are settled.
 Credential-like keys, URLs, and credential-shaped text in legacy JSON/error
 fields are redacted. Raw payloads and database/private configuration are never
 returned. All routes are GET-only; there is no mutation or action route.
+
+## Independent pregame context overlay
+
+`GET /research/observations/{observation_id}/context?as_of=<ISO-8601>` returns the
+latest append-only context known at that time (now by default). List and detail
+responses also expose `context_overlay`: timestamped weather, injuries, role,
+sources, descriptive flags, six evidence dimensions, and their plain-language
+reasons. Dashboard filters cover evidence quality, weather/injury concern, and
+role uncertainty.
+
+`pregame_context_snapshots` is separate from immutable `shadow_observations`.
+A separate collector appends rows; the research service never refreshes a
+provider itself. Selected public sources are NOAA/National Weather Service
+forecasts, official NFL/team game-status and inactive reports, and official team
+depth charts/transactions. Keep provider update times and document IDs in
+`sources`. Reporting must use `status_confidence=reported` or
+`change_status=reported`; only explicit structured evidence may be confirmed.
+No paid Odds API request or new Kalshi request is made.
+
+Weather is fresh for 3 hours, injury data for 12 hours, and role data for 7 days;
+the combined assessment becomes stale when any present category exceeds its limit. Refresh at 24h, 6h, 90m,
+and after official inactive lists. Historical reconstruction selects the newest
+row with `as_of_utc` no later than the requested time.
+
+Evidence dimensions are `model_signal`, `market_confirmation`,
+`weather_context`, `injury_context`, `role_context`, and `data_freshness`.
+Deterministic overall rules are: two missing categories is
+`insufficient_context`; stale data or four concerns is `weak`; two concerns is
+`mixed`; an edge of at least five points confirmed within five points by a
+same-threshold consensus is `strong`; otherwise `moderate`. These are evidence
+labels, not probabilities. Week 1 sets `historical_role_may_be_stale` only with
+explicit prior-usage dependency and a confirmed role/team/injury mismatch.
+
+### Deployment
+
+Run the existing schema bootstrap (`ShadowStore(DATABASE_URL)`) once to create
+the new table, deploy the API normally, and configure an independent collector
+to append the documented snapshots. No model retraining or scheduler change is
+needed. Rollback can leave the unused table in place; model observations remain
+unchanged.
