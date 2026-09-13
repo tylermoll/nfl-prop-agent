@@ -7,7 +7,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.main import app
 from app.research import ResearchRepository, get_repository
-from app.shadow_storage import metadata, observations, scheduler_executions, scheduler_slots, settlements
+from app.shadow_storage import (metadata, observations, pregame_context_snapshots,
+                                scheduler_executions, scheduler_slots, settlements)
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -177,3 +178,26 @@ def test_research_has_no_mutation_routes(research_client):
         if path.startswith("/research"):
             assert set(methods) <= {"get"}
     assert client.post("/research/observations").status_code == 405
+
+
+def test_context_endpoint_is_append_only_as_of_and_does_not_change_observation(research_client):
+    client, engine, calls = research_client
+    seed(engine)
+    old = {"context_id": "ctx-old", "observation_id": "obs-1", "as_of_utc": NOW-timedelta(hours=2),
+           "collected_at_utc": NOW-timedelta(hours=2), "weather": {"venue_type": "indoor"},
+           "injuries": {}, "role": {}, "sources": {"weather": "NOAA"}}
+    new = {**old, "context_id": "ctx-new", "as_of_utc": NOW+timedelta(minutes=1),
+           "collected_at_utc": NOW+timedelta(minutes=1), "weather": {"venue_type": "outdoor", "wind_mph": 24}}
+    with engine.begin() as conn:
+        conn.execute(insert(pregame_context_snapshots), [old, new])
+    before = client.get("/research/observations/obs-1").json()
+    historical = client.get("/research/observations/obs-1/context",
+                            params={"as_of": NOW.isoformat()}).json()
+    latest = client.get("/research/observations/obs-1/context",
+                        params={"as_of": (NOW+timedelta(minutes=2)).isoformat()}).json()
+    after = client.get("/research/observations/obs-1").json()
+    assert historical["context_id"] == "ctx-old" and historical["flags"]["indoor_weather_irrelevant"]
+    assert latest["context_id"] == "ctx-new" and latest["flags"]["wind_high"]
+    for field in ("model_over_probability", "model_under_probability", "probability_edge_pp", "model_point_prediction"):
+        assert before[field] == after[field]
+    assert calls == []
