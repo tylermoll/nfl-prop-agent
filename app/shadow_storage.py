@@ -65,6 +65,32 @@ class ShadowStore:
         allowed = {c.name for c in observations.columns}
         with self.engine.begin() as connection:
             connection.execute(insert(observations), {k: v for k, v in row.items() if k in allowed})
+
+    def append_context_snapshots(self, rows: list[dict]) -> int:
+        """Append context rows, ignoring only already-present deterministic IDs."""
+        if not rows:
+            return 0
+        ids = [row["context_id"] for row in rows]
+        with self.engine.begin() as connection:
+            existing = set(connection.execute(select(pregame_context_snapshots.c.context_id).where(
+                pregame_context_snapshots.c.context_id.in_(ids))).scalars())
+            # Also collapse duplicates inside a batch (for example, repeated
+            # equivalent observations supplied by a caller).
+            fresh_by_id = {row["context_id"]: row for row in rows if row["context_id"] not in existing}
+            fresh = list(fresh_by_id.values())
+            if fresh:
+                if self.engine.dialect.name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+                    result = connection.execute(pg_insert(pregame_context_snapshots).values(fresh)
+                        .on_conflict_do_nothing(index_elements=["context_id"]))
+                    return result.rowcount
+                if self.engine.dialect.name == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+                    result = connection.execute(sqlite_insert(pregame_context_snapshots).values(fresh)
+                        .on_conflict_do_nothing(index_elements=["context_id"]))
+                    return result.rowcount
+                connection.execute(insert(pregame_context_snapshots), fresh)
+        return 0
     def complete_capture(self, rows: list[dict], slot_row: dict) -> None:
         """Atomically append an immutable capture and mark its slot complete."""
         allowed = {c.name for c in observations.columns}
