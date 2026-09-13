@@ -147,42 +147,97 @@ def cached_lineage(cache_dir: Path, feature: pd.Series, observation: dict[str, A
             "latest_completed_current_season_game_present": not latest_2026.empty}
 
 
-def trace(*, database_url: str, feature_path: Path, artifact_path: Path,
-          history_cache_dir: Path, observation_id: str | None = None,
+def find_historical_artifact(artifact_id: str, market: str, *, configured_path: Path | None,
+                             search_roots: list[Path]) -> tuple[Path | None, dict[str, Any] | None]:
+    """Find a retained artifact by embedded ID, never by a mutable filename."""
+    candidates: list[Path] = []
+    if configured_path is not None and configured_path.is_file():
+        candidates.append(configured_path)
+    for root in search_roots:
+        root = root.expanduser().resolve()
+        if root.is_file():
+            candidates.append(root)
+        elif root.is_dir():
+            candidates.extend(path for path in root.rglob("*")
+                              if path.is_file() and path.suffix.lower() in {".joblib", ".pkl", ".pickle"})
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            artifact = joblib.load(resolved)
+        except Exception:
+            continue
+        if (isinstance(artifact, dict) and artifact.get("artifact_id") == artifact_id and
+                artifact.get("canonical_market") == market):
+            return resolved, artifact
+    return None, None
+
+
+def trace(*, database_url: str, feature_path: Path, artifact_path: Path | None,
+          history_cache_dir: Path, artifact_search_roots: list[Path] | None = None,
+          observation_id: str | None = None,
           player: str | None = None, market: str = "player_receptions",
           point: float | None = None, line: float | None = None,
           capture_window: str | None = None, side: str | None = None) -> dict[str, Any]:
     observation = find_observation(database_url, observation_id=observation_id, player=player,
         market=market, point=point, line=line, capture_window=capture_window, side=side)
-    artifact = joblib.load(artifact_path)
-    if artifact.get("artifact_id") != observation.get("model_version"):
-        raise ValueError("configured artifact is not the artifact used by this observation")
-    features = list(artifact["features"])
     row = select_feature_row(read_cache(feature_path), observation)
-    frame = pd.DataFrame([{name: row[name] for name in features}])
-    raw = float(artifact["pipeline"].predict(frame[features])[0])
-    adjustment = float(artifact.get("additive_bias_correction", 0.0))
-    return {"observation": {key: _json(observation.get(key)) for key in
+    expected_id = observation.get("model_version")
+    artifact, resolved_path = None, None
+    if artifact_path is not None and artifact_path.is_file():
+        configured = joblib.load(artifact_path)
+        if (configured.get("artifact_id") == expected_id and
+                configured.get("canonical_market") == observation["canonical_market"]):
+            resolved_path, artifact = artifact_path.expanduser().resolve(), configured
+    if artifact is None and observation_id:
+        resolved_path, artifact = find_historical_artifact(expected_id, observation["canonical_market"],
+            configured_path=artifact_path, search_roots=artifact_search_roots or [])
+    if artifact is None and not observation_id:
+        raise ValueError("configured artifact is not the artifact used by this observation")
+
+    provenance = (observation.get("context") or {}).get("artifact_provenance") or {}
+    features = list(artifact["features"] if artifact is not None else provenance.get("required_features") or [])
+    missing_features = [name for name in features if name not in row.index]
+    if missing_features:
+        raise ValueError(f"feature cache row lacks artifact-required features: {missing_features}")
+    base = {"observation": {key: _json(observation.get(key)) for key in
             ("observation_id", "player_id", "player_name", "game_id", "kickoff_utc", "team",
              "opponent", "canonical_market", "line", "point_prediction", "observed_at_utc")},
         "identity": {"stable_player_id": str(row.player_id), "player_name": row.player_name,
                      "home_team": row.home_team, "away_team": row.away_team,
                      "kickoff": _json(pd.Timestamp(row.kickoff)),
                      "team": observation.get("team"), "opponent": observation.get("opponent")},
-        "feature_cache": {"path": str(feature_path),
+        "feature_cache": {"path": str(feature_path), "matching_original_row": True,
                           "feature_built_at_utc": _json(pd.Timestamp(row.feature_built_at_utc)),
                           "feature_data_as_of_utc": _json(pd.Timestamp(row.feature_data_as_of_utc))},
-        "artifact": {"path": str(artifact_path), "sha256": _sha256(artifact_path),
+        "ordered_features": [{"position": i, "name": name, "value": _json(row[name])}
+                             for i, name in enumerate(features)],
+        "historical_lineage": cached_lineage(history_cache_dir, row, observation)}
+    if artifact is None:
+        base.update({"artifact": {"available": False, "artifact_id": expected_id,
+                                  "canonical_market": observation["canonical_market"],
+                                  "reason": "exact historical artifact was not found in retained files"},
+                     "prediction": {"exact_reproduction_possible": False,
+                                    "stored_final_point_prediction": _json(observation.get("point_prediction")),
+                                    "reason": "the exact estimator is unavailable; no substitute was used"}})
+        return base
+
+    frame = pd.DataFrame([{name: row[name] for name in features}])
+    raw = float(artifact["pipeline"].predict(frame[features])[0])
+    adjustment = float(artifact.get("additive_bias_correction", 0.0))
+    base.update({"artifact": {"available": True, "path": str(resolved_path), "sha256": _sha256(resolved_path),
                      "artifact_id": artifact.get("artifact_id"),
                      "canonical_market": artifact.get("canonical_market"),
                      "uncertainty_method": artifact.get("uncertainty_method"),
                      "uncertainty_version": artifact.get("uncertainty_version")},
-        "ordered_features": [{"position": i, "name": name, "value": _json(row[name])}
-                             for i, name in enumerate(features)],
-        "prediction": {"raw_estimator_prediction": raw, "additive_bias_correction": adjustment,
+        "prediction": {"exact_reproduction_possible": True, "raw_estimator_prediction": raw,
+                       "additive_bias_correction": adjustment,
                        "reproduced_final_point_prediction": raw + adjustment,
-                       "stored_final_point_prediction": _json(observation.get("point_prediction"))},
-        "historical_lineage": cached_lineage(history_cache_dir, row, observation)}
+                       "stored_final_point_prediction": _json(observation.get("point_prediction"))}})
+    return base
 
 
 def main() -> None:
@@ -196,15 +251,20 @@ def main() -> None:
     parser.add_argument("--capture-window")
     parser.add_argument("--history-cache-dir", type=Path,
                         default=Path(os.getenv("FOOTBALL_HISTORY_CACHE_DIR", "data/historical/raw")))
+    parser.add_argument("--artifact-search-root", action="append", type=Path, default=[],
+                        help="read-only root to scan for the observation's exact historical artifact")
     args = parser.parse_args()
     required = {"DATABASE_URL": os.getenv("DATABASE_URL"),
-                "FOOTBALL_CURRENT_FEATURE_PATH": os.getenv("FOOTBALL_CURRENT_FEATURE_PATH"),
-                "FOOTBALL_ARTIFACT_PLAYER_RECEPTIONS": os.getenv("FOOTBALL_ARTIFACT_PLAYER_RECEPTIONS")}
+                "FOOTBALL_CURRENT_FEATURE_PATH": os.getenv("FOOTBALL_CURRENT_FEATURE_PATH")}
+    configured_artifact = os.getenv("FOOTBALL_ARTIFACT_PLAYER_RECEPTIONS")
+    if not args.observation_id and not configured_artifact:
+        required["FOOTBALL_ARTIFACT_PLAYER_RECEPTIONS"] = None
     if missing := [key for key, value in required.items() if not value]:
         parser.error(f"missing environment variables: {', '.join(missing)}")
     result = trace(database_url=required["DATABASE_URL"],
         feature_path=Path(required["FOOTBALL_CURRENT_FEATURE_PATH"]),
-        artifact_path=Path(required["FOOTBALL_ARTIFACT_PLAYER_RECEPTIONS"]),
+        artifact_path=Path(configured_artifact) if configured_artifact else None,
+        artifact_search_roots=args.artifact_search_root,
         history_cache_dir=args.history_cache_dir, observation_id=args.observation_id,
         player=args.player, market=args.market, point=args.point, line=args.line,
         capture_window=args.capture_window, side=args.side)
