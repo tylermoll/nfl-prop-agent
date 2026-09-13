@@ -23,6 +23,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, median_abso
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
+from app.modeling.calibration import METHOD as CALIBRATION_METHOD, VERSION as CALIBRATION_VERSION
+from app.modeling.calibration import prediction_bin_edges, select_residual_calibration
+
 MARKETS = ("player_pass_yds", "player_reception_yds", "player_receptions")
 
 # This is an allowlist, not a heuristic selection of numeric columns. Current
@@ -422,15 +425,22 @@ def run_benchmark(table: pd.DataFrame, output_dir: str | Path, config: Benchmark
         # distribution remains out-of-fit because the estimator saw train only.
         live_calibration_prediction = calibration_prediction + bias_correction
         live_calibration_residuals = calibration_residuals - bias_correction
-        live_edges = np.unique(np.quantile(live_calibration_prediction, np.linspace(0, 1, 5)))
+        probability_calibration, probability_candidate_results = select_residual_calibration(
+            live_calibration_prediction, live_calibration_residuals, config.threshold_offsets)
+        live_edges = prediction_bin_edges(live_calibration_prediction, probability_calibration.bin_count)
+        summary["markets"][market]["probability_calibration_selection"] = {
+            "protocol": "first 60% of validation season calibrates; final 40% is held out; half-point threshold grid",
+            "selected": asdict(probability_calibration), "candidates": probability_candidate_results,
+        }
         joblib.dump({"pipeline": final_model, "additive_bias_correction": bias_correction,
                      "rejected_or_selected_candidate_correction": proposed_bias_correction,
                      "features": features, "canonical_market": market,
                      "calibration_predictions": live_calibration_prediction,
                      "calibration_residuals": live_calibration_residuals,
                      "prediction_bin_edges": live_edges.tolist(),
-                     "uncertainty_method": "prediction_conditional_empirical_residual_ecdf",
-                     "uncertainty_version": "1"}, output / f"{market}.joblib")
+                     "probability_calibration": asdict(probability_calibration),
+                     "uncertainty_method": CALIBRATION_METHOD,
+                     "uncertainty_version": CALIBRATION_VERSION}, output / f"{market}.joblib")
     pd.concat(all_predictions).to_parquet(output / "predictions.parquet", index=False)
     pd.concat(all_intervals).to_parquet(output / "predictive_intervals.parquet", index=False)
     pd.concat(all_calibration_residuals).to_parquet(output / "calibration_residuals.parquet", index=False)

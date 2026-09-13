@@ -15,6 +15,8 @@ from app.modeling.benchmark import (
     uncertainty_diagnostics,
     validate_feature_names,
 )
+from app.modeling.calibration import (prediction_bin_edges, select_residual_calibration,
+                                      smoothed_exceedance)
 
 
 def fixture_rows() -> pd.DataFrame:
@@ -100,3 +102,21 @@ def test_baselines_are_reproducible_and_use_only_named_pregame_columns():
     for name in first:
         np.testing.assert_equal(first[name], second[name])
     assert first["blended_3_5_season"][0] == pytest.approx((1.25 + 1.5 + 1.75) / 3)
+
+
+def test_shrunk_ecdf_is_continuity_corrected_and_between_local_and_market():
+    local, market = np.array([1., 2.]), np.array([-2., -1., 1., 2.])
+    assert smoothed_exceedance(local, market, 0., 0) == pytest.approx(2.5 / 3)
+    blended = smoothed_exceedance(local, market, 0., 2)
+    assert .5 < blended < 2.5 / 3
+
+
+def test_calibration_selection_is_chronological_and_reproducible():
+    predictions = np.linspace(0, 10, 30)
+    residuals = np.sin(predictions)
+    first, rows = select_residual_calibration(predictions, residuals)
+    second, repeated = select_residual_calibration(predictions, residuals)
+    assert first == second
+    assert rows == repeated and len(rows) == 16
+    assert all(row["evaluation_rows"] == 60 for row in rows)
+    assert prediction_bin_edges(predictions, first.bin_count)[0] == -np.inf
