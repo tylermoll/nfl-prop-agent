@@ -17,6 +17,7 @@ import numpy as np
 from sqlalchemy import create_engine, select
 
 from app.math_utils import american_to_probability
+from app.modeling.calibration import smoothed_exceedance
 from app.shadow_storage import normalize_database_url, observations
 
 
@@ -61,6 +62,9 @@ def artifact_audit(path: str | Path) -> dict[str, Any]:
             "residuals_sorted": [float(x) for x in np.sort(pool)],
         })
     return {"artifact": str(path), "artifact_id": artifact.get("artifact_id"),
+            "uncertainty_method": artifact.get("uncertainty_method"),
+            "uncertainty_version": artifact.get("uncertainty_version"),
+            "probability_calibration": artifact.get("probability_calibration"),
             "calibration_sample_size": int(len(residuals)), "prediction_bin_edges": [
                 None if not np.isfinite(x) else float(x) for x in edges], "buckets": buckets}
 
@@ -74,11 +78,17 @@ def probability_trace(artifact_report: dict[str, Any], point: float, line: float
     pool = np.asarray(artifact_report["buckets"][bucket]["residuals_sorted"], float)
     cutoff = line - point
     exceed = pool[pool > cutoff]
-    over = len(exceed) / len(pool)
+    raw_over = len(exceed) / len(pool)
+    calibration = artifact_report.get("probability_calibration")
+    market_pool = np.concatenate([np.asarray(x["residuals_sorted"], float)
+                                  for x in artifact_report["buckets"]])
+    over = (smoothed_exceedance(pool, market_pool, cutoff, calibration["prior_weight"])
+            if calibration else raw_over)
     return {"point_prediction": point, "line": line, "residual_cutoff": cutoff,
             "residual_bucket": bucket, "effective_calibration_n": int(len(pool)),
             "over_tail_condition": "residual > line - point", "over_tail_residuals": exceed.tolist(),
-            "over_tail_count": int(len(exceed)), "over_probability": over,
+            "over_tail_count": int(len(exceed)), "raw_bucket_over_probability": raw_over,
+            "over_probability": over,
             "under_probability": 1 - over,
             "under_definition": "complement of strict Over (therefore actual <= line)"}
 
@@ -100,13 +110,14 @@ def _group_report(rows: list[dict], keys: tuple[str, ...]) -> dict[str, Any]:
     return output
 
 
-def observation_audit(database_url: str) -> dict[str, Any]:
+def observation_audit(database_url: str, artifact_reports: dict[str, Any] | None = None) -> dict[str, Any]:
     engine = create_engine(normalize_database_url(database_url))
     with engine.connect() as connection:
         rows = [dict(x._mapping) for x in connection.execute(select(observations))]
     for row in rows:
         row["capture_window"] = (row.get("context") or {}).get("capture_slot", "unknown")
     disagreements = []
+    rescored = []
     invariant_failures = {"break_even_from_price": 0, "edge_uses_offered_side": 0}
     for row in rows:
         expected_break_even = american_to_probability(int(row["hard_rock_offered_odds"]))
@@ -115,6 +126,14 @@ def observation_audit(database_url: str) -> dict[str, Any]:
         expected_edge = 100 * (row["model_probability"] - expected_break_even)
         if not np.isclose(row["raw_probability_edge_pp"], expected_edge):
             invariant_failures["edge_uses_offered_side"] += 1
+        report = (artifact_reports or {}).get(row["canonical_market"])
+        if report and row.get("point_prediction") is not None:
+            trace = probability_trace(report, float(row["point_prediction"]), float(row["line"]))
+            probability = trace["over_probability"] if row["side"] == "over" else trace["under_probability"]
+            new_edge = 100 * (probability - expected_break_even)
+            rescored.append({"old": float(row["raw_probability_edge_pp"]), "new": new_edge,
+                             "cutoff": float(row["line"] - row["point_prediction"]),
+                             "market": row["canonical_market"], "side": row["side"]})
         reference_over = _number((row.get("reference_context") or {}).get(
             "exact_threshold_over_no_vig_probability"))
         if reference_over is None:
@@ -126,7 +145,12 @@ def observation_audit(database_url: str) -> dict[str, Any]:
                   "by_residual_bucket": ("residual_bucket",), "by_capture_window": ("capture_window",),
                   "by_market_side_bucket_window": (
                       "canonical_market", "side", "residual_bucket", "capture_window")}
+    edge_comparison = {str(t): {"old": sum(abs(x["old"]) > t for x in rescored),
+                                "new": sum(abs(x["new"]) > t for x in rescored)}
+                       for t in (10, 20, 30)}
     return {"observation_count": len(rows), "matchup_count": len({r["game_id"] for r in rows}),
+            "read_only_rescore": {"count": len(rescored), "absolute_edge_counts": edge_comparison,
+                                   "threshold_minus_prediction": _summary([x["cutoff"] for x in rescored])},
             "mathematical_invariant_failure_counts": invariant_failures,
             "distributions": {name: _group_report(rows, keys) for name, keys in dimensions.items()},
             "model_vs_same_threshold_reference_pp": {
@@ -147,7 +171,7 @@ def main() -> None:
                (value.split("=", 1) for value in args.artifact)}
     result: dict[str, Any] = {"artifacts": reports}
     if args.database_url:
-        result["production_observations"] = observation_audit(args.database_url)
+        result["production_observations"] = observation_audit(args.database_url, reports)
     if args.trace:
         market, point, line = args.trace
         result["trace"] = probability_trace(reports[market], float(point), float(line))

@@ -68,10 +68,12 @@ def test_probability_provenance_and_exact_threshold(tmp_path):
     joblib.dump({"pipeline": model, "features":["x"], "artifact_id":"football-v1",
                  "calibration_predictions":np.array([5.,10.,15.,20.]),
                  "calibration_residuals":np.array([-2.,-1.,1.,3.]),
-                 "prediction_bin_edges":[-float("inf"), float("inf")]}, path)
+                 "prediction_bin_edges":[-float("inf"), float("inf")],
+                 "probability_calibration":{"bin_count":1,"prior_weight":100.},
+                 "uncertainty_version":"2"}, path)
     result = FootballArtifactScorer(path).score(pd.DataFrame({"x":[4]}), 10, NOW)
     assert result.model_version == "football-v1" and result.point_prediction == 10
-    assert result.over_probability == .5 and result.uncertainty_method.startswith("prediction_conditional")
+    assert result.over_probability == .5 and result.uncertainty_method.startswith("shrunk_prediction_conditional")
 
 def test_drawdown_brier_and_calibration():
     assert maximum_drawdown([10,-4,-8,3]) == 12

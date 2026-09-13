@@ -14,6 +14,9 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from app.modeling.calibration import (METHOD as CALIBRATION_METHOD, VERSION as CALIBRATION_VERSION,
+                                      prediction_bin_edges, residual_probability)
+
 
 @dataclass(frozen=True)
 class FootballScore:
@@ -30,8 +33,8 @@ class FootballScore:
 
 class FootballArtifactScorer:
     """Score leakage-safe rows using prediction-conditional empirical errors."""
-    METHOD = "prediction_conditional_empirical_residual_ecdf"
-    VERSION = "1"
+    METHOD = CALIBRATION_METHOD
+    VERSION = CALIBRATION_VERSION
 
     def __init__(self, artifact_path: str | Path):
         self.path = Path(artifact_path)
@@ -51,16 +54,16 @@ class FootballArtifactScorer:
                  float(self.artifact.get("additive_bias_correction", 0.0)))
         predictions = np.asarray(self.artifact["calibration_predictions"], float)
         residuals = np.asarray(self.artifact["calibration_residuals"], float)
-        edges = np.asarray(self.artifact.get("prediction_bin_edges") or
-                           np.quantile(predictions, np.linspace(0, 1, 5)), float)
+        calibration = self.artifact.get("probability_calibration")
+        if not calibration or self.artifact.get("uncertainty_version") != self.VERSION:
+            raise ValueError("artifact requires uncertainty calibration version 2; regenerate production artifacts")
+        raw_edges = self.artifact.get("prediction_bin_edges")
+        edges = np.asarray(raw_edges if raw_edges is not None else
+                           prediction_bin_edges(predictions, int(calibration["bin_count"])), float)
         edges[0], edges[-1] = -np.inf, np.inf
-        buckets = np.clip(np.searchsorted(edges, predictions, side="right") - 1, 0, len(edges)-2)
-        bucket = int(np.clip(np.searchsorted(edges, point, side="right") - 1, 0, len(edges)-2))
-        pool = residuals[buckets == bucket]
-        if not len(pool):
-            raise ValueError("selected residual bucket is empty")
-        # Strict exceedance correctly leaves integer-threshold ties outside Over.
-        over = float(np.mean(pool > float(threshold) - point))
+        over, bucket, pool = residual_probability(
+            point, float(threshold), predictions, residuals, edges,
+            float(calibration["prior_weight"]))
         return FootballScore(point, over, 1-over, self.version,
                              feature_built_at_utc.astimezone(timezone.utc), self.METHOD,
                              self.VERSION, bucket, float(np.std(pool, ddof=1)) if len(pool) > 1 else 0.0)

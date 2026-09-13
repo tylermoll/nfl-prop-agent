@@ -21,6 +21,12 @@ The command rejects 2026 or later outcomes. Override historical years only with
 Use `--keep-temp` to retain a generated temporary directory for investigation,
 or `--work-dir /path` to choose and retain one explicitly.
 
+The command also selects and persists probability-calibration v2 parameters
+using a chronological internal holdout within the validation season. After a
+v2 code deployment, regenerate all three artifacts; scoring fails closed on
+older probability semantics. See
+[`probability-calibration-v2.md`](probability-calibration-v2.md).
+
 ## Operational estimate
 
 The September 2026 audit downloaded approximately 15 MB of compressed parquet

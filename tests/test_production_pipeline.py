@@ -23,7 +23,9 @@ def _artifact(path, version, feature="x"):
     joblib.dump({"pipeline": model, "features": [feature], "artifact_id": version,
                  "calibration_predictions": np.array([10., 10.]),
                  "calibration_residuals": np.array([-1., 1.]),
-                 "prediction_bin_edges": [-float("inf"), float("inf")]}, path)
+                 "prediction_bin_edges": [-float("inf"), float("inf")],
+                 "probability_calibration": {"bin_count": 1, "prior_weight": 100.0},
+                 "uncertainty_version": "2"}, path)
 
 
 def _configure(monkeypatch, tmp_path, *, feature="x"):

@@ -29,6 +29,8 @@ def models():
                     "calibration_predictions": [9.0, 10.0, 11.0, 12.0],
                     "calibration_residuals": [-1.0, 0.0, 1.0, 2.0],
                     "prediction_bin_edges": [-100.0, 100.0], "artifact_id": f"test-{market}",
+                    "probability_calibration": {"bin_count": 1, "prior_weight": 100.0},
+                    "uncertainty_version": "2",
                     "provenance": {"built_at_utc": "2026-09-01T00:00:00+00:00",
                         "training_seasons": [2022, 2023], "validation_calibration_season": 2024,
                         "feature_schema": ["rolling_3_mean"], "calibration_methodology": "empirical",

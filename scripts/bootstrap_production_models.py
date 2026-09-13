@@ -92,6 +92,8 @@ def _validate_artifact(path: Path, market: str) -> dict[str, Any]:
     required = {"pipeline", "features", "calibration_predictions", "calibration_residuals"}
     if missing := required - artifact.keys():
         raise ValueError(f"artifact lacks required fields: {sorted(missing)}")
+    if artifact.get("uncertainty_version") == "2" and not artifact.get("probability_calibration"):
+        raise ValueError(f"artifact {path} lacks version 2 probability calibration parameters")
     return artifact
 
 

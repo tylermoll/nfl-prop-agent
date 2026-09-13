@@ -24,7 +24,8 @@ def artifact(market: str) -> dict:
     model = DummyRegressor().fit([[0.0]], [0.0])
     return {"pipeline": model, "features": ["rolling_3_mean"], "canonical_market": market,
             "calibration_predictions": np.array([1.0, 2.0]), "calibration_residuals": np.array([-1.0, 1.0]),
-            "uncertainty_method": "prediction_conditional_empirical_residual_ecdf", "uncertainty_version": "1"}
+            "probability_calibration": {"bin_count": 1, "prior_weight": 100.0},
+            "uncertainty_method": "shrunk_prediction_conditional_empirical_residual_ecdf", "uncertainty_version": "2"}
 
 
 def test_2025_validation_isolation_and_no_2026_outcomes():
