@@ -258,6 +258,8 @@ def create_scheduler_pipeline():
             score = scorer.score(features, quote.line, built)
             reference = _reference_context(rows, quote, settings.the_odds_api_target_bookmaker)
             kalshi = _kalshi_context(kalshi_rows, quote)
+            away_team, home_team = canonical_team(quote.away_team), canonical_team(quote.home_team)
+            canonical_event = canonical_event_identity(away_team, home_team)
             fresh = freshness_metadata(captured_at=now, provider_observed_at=quote.observed_at_utc,
                 provider_updated_at=quote.source_updated_at_utc, feature_built_at=built,
                 config=SchedulerConfig(provider_stale_after=timedelta(seconds=settings.scheduler_provider_stale_seconds),
@@ -270,6 +272,9 @@ def create_scheduler_pipeline():
                 offered_odds=quote.american_odds, model_score=score, reference_context=reference,
                 kalshi_context=kalshi, source_ids={"hardrock": quote.source_market_id}, freshness=fresh,
                 context={"capture_slot": capture.slot, "capture_target_time_utc": capture.target_time_utc.isoformat(),
+                         "event_identity": {"provider_event_id": capture.event_id,
+                             "canonical_event": canonical_event, "away_team": away_team,
+                             "home_team": home_team, "kickoff_utc": capture.kickoff_utc.isoformat()},
                          "feature_data_as_of_utc": identity._asof.isoformat(),
                          "artifact_provenance": models.provenance[market]}))
         if not output and rejected:

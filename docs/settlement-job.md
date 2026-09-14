@@ -9,9 +9,18 @@ primary key on `observation_id` is the final duplicate/race safeguard.
 
 ## Identity and result rules
 
-An observation resolves only through its exact nflverse `game_id`, or (for
-legacy provider-event IDs) one unique exact UTC kickoff and exact canonical
-home/away team pair. A schedule must contain explicit final/completed state or
+An observation resolves only through its exact nflverse `game_id`, through an
+`nfl:<team>:<team>` identity, or through the immutable structured event identity
+now persisted in its context, plus one unique exact canonical team pair and its
+scheduled UTC kickoff.
+The deployed matchup identity was historically sorted and is therefore not
+trusted to prove home/away orientation by itself; nflverse supplies venue only
+after the unique team-and-time match. Explicit aliases are those in
+`app.identities.NFL_TEAMS`; no fuzzy aliases are used. Kickoffs may differ by at
+most 59 seconds solely because provider timestamps can retain seconds while the
+nflverse schedule is minute-granular. Team pairing is always required and time
+proximity alone is never used. Zero, conflicting, or multiple candidates fail
+closed. A schedule must contain explicit final/completed state or
 the nflverse postgame `result`. A weekly row must then match season, week,
 stable nflverse/GSIS `player_id`, and nflverse game ID when that field is
 published (otherwise the exact player team within the already-resolved game).
@@ -31,6 +40,37 @@ queries already outer-join `shadow_settlements`, so they reflect commits
 immediately without copying data.
 
 ## CLI and Railway
+
+Run the identity audit before the write-capable worker:
+
+```bash
+python -m scripts.audit_settlement_identities
+```
+
+This command performs only database reads and an nflverse schedule fetch. It
+groups observations by immutable event identity and kickoff, reports the
+candidate nflverse ID, teams, kickoff, season/week, match method, verification
+state, failure reason, associated observation count, capture slots, and safe
+identity excerpts from scheduler executions and observation provenance. It
+never emits raw provider payloads or invokes the settlement writer.
+
+The 32-character production observation IDs originate unchanged from The Odds
+API event-list `id`: the scheduler uses that value for `DueCapture.event_id`,
+the production builder copies it to `shadow_observations.game_id`, and Hard Rock
+source-market IDs repeat it as their prefix. Capture-slot rows retain the same
+ID and timing but no teams. Successful scheduler execution capture entries also
+retain only ID/timing. Historical recovery is therefore possible only for an
+event that has other already-persisted scheduler execution evidence—such as a
+failed capture or rejected-prop diagnostic—binding that same provider event ID
+to a canonical team pair and the same kickoff. The audit reports this chain;
+kickoff, slot metadata, source-market prefixes, or player identity alone never
+verify a game. Events without persisted team evidence are unrecoverable without
+rewriting history and remain failed closed.
+
+Future observations persist a structured `context.event_identity` containing
+the provider event ID, canonical event, explicit away/home teams, and kickoff.
+It is written with the observation and cross-validated internally before use;
+it does not modify legacy observations.
 
 Exact Start Command:
 

@@ -156,6 +156,9 @@ def test_valid_side_observations_provenance_and_partial_context(monkeypatch, tmp
     assert all(row["reference_context"]["insufficient_reference_coverage"] for row in observations)
     provenance = observations[0]["context"]["artifact_provenance"]
     assert provenance["artifact_sha256"] and provenance["market"] == "player_pass_yds"
+    event_identity = observations[0]["context"]["event_identity"]
+    assert event_identity == {"provider_event_id": "provider-g", "canonical_event": "nfl:buf:mia",
+        "away_team": "mia", "home_team": "buf", "kickoff_utc": KICKOFF.isoformat()}
     assert observations[0]["feature_built_at_utc"] < observations[0]["kickoff_utc"]
 
 

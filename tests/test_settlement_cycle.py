@@ -6,7 +6,10 @@ from sqlalchemy import func, insert, select
 
 from app.research import ResearchRepository
 from app.settlement import SettlementCycle
-from app.shadow_storage import ShadowStore, observations, settlements
+from app.settlement_audit import audit_settlement_identities
+from app.settlement_identity import resolve_settlement_game
+from app.shadow_storage import (ShadowStore, observations, scheduler_executions,
+                                scheduler_slots, settlements)
 
 NOW = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
 # nflverse's 20:00 Eastern kickoff falls after midnight UTC during EDT.
@@ -147,3 +150,122 @@ def test_groups_downloads_by_season_not_observation(store):
     client = FootballOnly()
     run(store, client)
     assert client.calls == [("schedules", None, True), ("weekly_stats", 2026, True)]
+
+
+def normalized_games(*rows):
+    from app.historical.normalize import normalize_schedules
+    return normalize_schedules(pd.DataFrame(rows))
+
+
+def schedule(game_id="2026_01_MIA_BUF", *, home="BUF", away="MIA",
+             day="2026-09-13", time="20:00"):
+    return {"season": 2026, "week": 1, "game_id": game_id, "home_team": home,
+            "away_team": away, "gameday": day, "gametime": time, "result": "final"}
+
+
+def test_current_matchup_identity_bridges_to_nflverse_id_without_observation_team_fields(store):
+    row = observation(game="nfl:buf:mia")
+    row["team"] = row["opponent"] = None
+    add(store, row)
+    client = FootballOnly(game_id="2026_01_MIA_BUF")
+    report = run(store, client)
+    assert report["observations_settled"] == 1
+    assert settlement_rows(store)[0]["result_source_id"].split(":")[4] == "2026_01_MIA_BUF"
+
+
+def test_explicit_abbreviation_aliases_and_second_normalization_resolve():
+    games = normalized_games(schedule(home="KC", away="ARI"))
+    row = observation(game="nfl:arz:kcc", kickoff=KICKOFF + timedelta(seconds=59))
+    row["team"] = row["opponent"] = None
+    resolved = resolve_settlement_game(row, games)
+    assert resolved.identity_verified and resolved.game.game_id == "2026_01_MIA_BUF"
+
+
+def test_season_week_canonical_identity_resolves_deterministically():
+    games = normalized_games(schedule(), {**schedule("2027_01_MIA_BUF"), "season": 2027})
+    row = observation(game="nfl:2026:1:mia:buf")
+    row["team"] = row["opponent"] = None
+    resolved = resolve_settlement_game(row, games)
+    assert resolved.identity_verified and resolved.game.game_id == "2026_01_MIA_BUF"
+
+
+def test_ambiguous_schedule_candidates_fail_closed():
+    games = normalized_games(schedule("one"), schedule("two"))
+    result = resolve_settlement_game(observation(game="nfl:buf:mia"), games)
+    assert not result.identity_verified and result.failure_reason == "ambiguous_candidates"
+
+
+@pytest.mark.parametrize(("row", "reason"), [
+    (observation(game="nfl:buf:nyj"), "conflicting_teams"),
+    (observation(game="nfl:buf:mia", kickoff=KICKOFF + timedelta(minutes=1)), "kickoff_mismatch"),
+    (observation(game="nfl:buf:nyj", kickoff=KICKOFF, player="p1"), "conflicting_teams"),
+])
+def test_identity_bridge_rejects_wrong_matchup_or_kickoff(row, reason):
+    games = normalized_games(schedule())
+    result = resolve_settlement_game(row, games)
+    assert not result.identity_verified and result.failure_reason == reason
+
+
+def test_no_candidate_fails_closed():
+    games = normalized_games(schedule(home="KC", away="DEN"))
+    row = observation(game="nfl:buf:mia")
+    row["team"] = row["opponent"] = None
+    result = resolve_settlement_game(row, games)
+    assert not result.identity_verified and result.failure_reason == "no_team_candidate"
+
+
+def test_read_only_audit_reports_mapping_and_does_not_change_observation(store):
+    row = observation(game="nfl:buf:mia")
+    row["team"] = row["opponent"] = None
+    add(store, row)
+    before = store.all()
+    audit = audit_settlement_identities(store=store, nflverse=FootballOnly(
+        game_id="2026_01_MIA_BUF"), now=NOW)
+    assert audit["read_only"] and audit["total_unsettled_observations"] == 1
+    assert audit["events"][0]["candidate_nflverse_game_id"] == "2026_01_MIA_BUF"
+    assert audit["events"][0]["identity_verified"] is True
+    assert store.all() == before and settlement_rows(store) == []
+
+
+def test_read_only_audit_recovers_opaque_provider_id_only_from_persisted_scheduler_evidence(store):
+    opaque = "17885cb8dcade8f6c3bce14b2de805e8"
+    row = observation(game=opaque)
+    row["team"] = row["opponent"] = None
+    row["source_observation_ids"] = {"hardrock": f"{opaque}:hardrockbet:player_pass_yds:Safe Player"}
+    add(store, row)
+    details = {"completed": [{"event_id": opaque, "kickoff_utc": KICKOFF.isoformat(),
+        "slot": "90m", "target_time_utc": (KICKOFF-timedelta(minutes=90)).isoformat()}],
+        "rejected_props": [{"provider_event_id": opaque, "canonical_event": "nfl:buf:mia"}]}
+    with store.engine.begin() as connection:
+        connection.execute(insert(scheduler_slots), {"event_id": opaque, "slot": "90m",
+            "target_time_utc": KICKOFF-timedelta(minutes=90), "status": "completed", "attempts": 1,
+            "reason": None, "updated_at_utc": NOW})
+        connection.execute(insert(scheduler_executions), {"execution_id": "execution-1",
+            "started_at_utc": NOW, "ended_at_utc": NOW, "details": details})
+    before = store.all()
+    audit = audit_settlement_identities(store=store, nflverse=FootballOnly(
+        game_id="2026_01_MIA_BUF"), now=NOW)
+    event = audit["events"][0]
+    assert event["provider_source_event_ids"] == [opaque]
+    assert event["persisted_canonical_events"] == ["nfl:buf:mia"]
+    assert event["candidate_nflverse_game_id"] == "2026_01_MIA_BUF"
+    assert event["match_method"] == "persisted_scheduler_canonical_event_and_kickoff"
+    assert event["identity_verified"] is True and len(event["evidence_chain"]) == 4
+    assert store.all() == before and settlement_rows(store) == []
+
+
+def test_read_only_audit_does_not_recover_opaque_id_from_kickoff_slot_or_source_id_alone(store):
+    opaque = "1edfa5ceaa1ad2cb57df1c1b908731f6"
+    row = observation(game=opaque)
+    row["team"] = row["opponent"] = None
+    row["source_observation_ids"] = {"hardrock": f"{opaque}:hardrockbet:market:Player"}
+    add(store, row)
+    with store.engine.begin() as connection:
+        connection.execute(insert(scheduler_slots), {"event_id": opaque, "slot": "90m",
+            "target_time_utc": KICKOFF-timedelta(minutes=90), "status": "completed", "attempts": 1,
+            "reason": None, "updated_at_utc": NOW})
+    audit = audit_settlement_identities(store=store, nflverse=FootballOnly(), now=NOW)
+    event = audit["events"][0]
+    assert event["provider_source_event_ids"] == [opaque] and event["capture_slots"]
+    assert event["identity_verified"] is False
+    assert event["failure_reason"] == "persisted_team_identity_not_found"
