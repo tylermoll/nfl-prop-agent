@@ -14,17 +14,11 @@ from app.historical.features import MARKETS
 from app.historical.normalize import normalize_schedules, normalize_weekly
 from app.identities import canonical_team
 from app.scheduler import sanitized_error
+from app.settlement_identity import resolve_settlement_game
 from app.shadow import settle_observations
 
 _LOCAL_LOCK = Lock()
 _ADVISORY_LOCK_ID = 681_944_731
-
-
-def _utc(value: Any) -> datetime:
-    stamp = pd.Timestamp(value)
-    if stamp.tzinfo is None:
-        stamp = stamp.tz_localize("UTC")
-    return stamp.tz_convert("UTC").to_pydatetime()
 
 
 def _is_final(row: pd.Series) -> bool:
@@ -142,24 +136,8 @@ class SettlementCycle:
 
     @staticmethod
     def _exact_game(observation: dict, schedules: pd.DataFrame) -> pd.Series | None:
-        # Prefer an already-canonical nflverse game ID. Legacy captures use the
-        # provider event ID and require the exact kickoff plus exact team pair.
-        direct = schedules[schedules.game_id.astype(str) == str(observation["game_id"])]
-        if len(direct) == 1:
-            game = direct.iloc[0]
-            if _utc(game.kickoff) != _utc(observation["kickoff_utc"]):
-                return None
-            supplied = {canonical_team(observation.get("team")), canonical_team(observation.get("opponent"))}
-            expected = {str(game.home_team), str(game.away_team)}
-            return game if None not in supplied and supplied == expected else None
-        team, opponent = canonical_team(observation.get("team")), canonical_team(observation.get("opponent"))
-        if not team or not opponent:
-            return None
-        kickoff = _utc(observation["kickoff_utc"])
-        match = schedules[(schedules.kickoff.map(_utc) == kickoff) & (
-            ((schedules.home_team == team) & (schedules.away_team == opponent)) |
-            ((schedules.home_team == opponent) & (schedules.away_team == team)))]
-        return match.iloc[0] if len(match) == 1 else None
+        resolution = resolve_settlement_game(observation, schedules)
+        return resolution.game if resolution.identity_verified else None
 
     @staticmethod
     def _exact_result(observation: dict, game: pd.Series, weekly: pd.DataFrame) -> dict | None:

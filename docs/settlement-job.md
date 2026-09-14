@@ -9,9 +9,17 @@ primary key on `observation_id` is the final duplicate/race safeguard.
 
 ## Identity and result rules
 
-An observation resolves only through its exact nflverse `game_id`, or (for
-legacy provider-event IDs) one unique exact UTC kickoff and exact canonical
-home/away team pair. A schedule must contain explicit final/completed state or
+An observation resolves only through its exact nflverse `game_id`, or through
+the deployed `nfl:<team>:<team>` identity (plus any populated observation team
+fields), one unique exact canonical team pair, and its scheduled UTC kickoff.
+The deployed matchup identity was historically sorted and is therefore not
+trusted to prove home/away orientation by itself; nflverse supplies venue only
+after the unique team-and-time match. Explicit aliases are those in
+`app.identities.NFL_TEAMS`; no fuzzy aliases are used. Kickoffs may differ by at
+most 59 seconds solely because provider timestamps can retain seconds while the
+nflverse schedule is minute-granular. Team pairing is always required and time
+proximity alone is never used. Zero, conflicting, or multiple candidates fail
+closed. A schedule must contain explicit final/completed state or
 the nflverse postgame `result`. A weekly row must then match season, week,
 stable nflverse/GSIS `player_id`, and nflverse game ID when that field is
 published (otherwise the exact player team within the already-resolved game).
@@ -31,6 +39,19 @@ queries already outer-join `shadow_settlements`, so they reflect commits
 immediately without copying data.
 
 ## CLI and Railway
+
+Run the identity audit before the write-capable worker:
+
+```bash
+python -m scripts.audit_settlement_identities
+```
+
+This command performs only database reads and an nflverse schedule fetch. It
+groups observations by immutable event identity and kickoff, reports the
+candidate nflverse ID, teams, kickoff, season/week, match method, verification
+state, failure reason, and associated observation count, and never invokes the
+settlement writer. Only run the settlement command after every intended event
+group is uniquely verified.
 
 Exact Start Command:
 
