@@ -151,7 +151,11 @@ def audit_settlement_identities(*, store, nflverse, refresh: bool = True,
         slots = [{"event_id": event_id, "slot": row["slot"],
                   "target_time_utc": _iso(row["target_time_utc"]), "status": row["status"]}
                  for row in sorted(slots_by_event[event_id], key=lambda value: (str(value["slot"]), value["target_time_utc"]))]
-        events.append({"observation_game_id": event_id, "observation_kickoff_utc": kickoff,
+        events.append({"observation_event_identity": event_id,
+            "observation_game_id": event_id,
+            "parsed_away_team": parsed[0] if parsed else None,
+            "parsed_home_team": parsed[1] if parsed else None,
+            "observation_kickoff_utc": kickoff,
             "observation_team_values": sorted({str(row["team"]) for row in rows if row.get("team")}),
             "observation_opponent_values": sorted({str(row["opponent"]) for row in rows if row.get("opponent")}),
             "provider_source_event_ids": source_provider_ids, "capture_slots": slots,
