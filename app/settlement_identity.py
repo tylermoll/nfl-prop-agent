@@ -71,12 +71,31 @@ def resolve_settlement_game(observation: dict, schedules: pd.DataFrame) -> GameI
     parsed = identity[0] if identity else None
     identity_season = identity[1] if identity else None
     identity_week = identity[2] if identity else None
+    persisted_context = (observation.get("context", {}).get("event_identity")
+                         if isinstance(observation.get("context"), dict) else None)
+    context_pair = None
+    if isinstance(persisted_context, dict):
+        context_identity = _parse_identity(persisted_context.get("canonical_event"))
+        away = canonical_team(persisted_context.get("away_team"))
+        home = canonical_team(persisted_context.get("home_team"))
+        context_pair = {away, home} if away and home and away != home else None
+        valid_context = (str(persisted_context.get("provider_event_id", "")) == event_id and
+                         context_identity is not None and context_pair == set(context_identity[0]))
+        try:
+            valid_context = valid_context and abs(
+                utc_datetime(persisted_context.get("kickoff_utc")) -
+                utc_datetime(observation["kickoff_utc"])) <= KICKOFF_TOLERANCE
+        except (KeyError, TypeError, ValueError):
+            valid_context = False
+        if not valid_context:
+            return GameIdentityResolution(None, False, None, "conflicting_persisted_event_identity", parsed)
     supplied = tuple(canonical_team(observation.get(key)) for key in ("team", "opponent"))
     supplied_pair = set(supplied) if None not in supplied and supplied[0] != supplied[1] else None
     parsed_pair = set(parsed) if parsed else None
-    if supplied_pair and parsed_pair and supplied_pair != parsed_pair:
+    pairs = [pair for pair in (supplied_pair, parsed_pair, context_pair) if pair]
+    if any(pair != pairs[0] for pair in pairs[1:]):
         return GameIdentityResolution(None, False, None, "conflicting_teams", parsed)
-    proven_pair = parsed_pair or supplied_pair
+    proven_pair = parsed_pair or supplied_pair or context_pair
 
     direct = schedules[schedules.game_id.astype(str) == event_id]
     if len(direct) > 1:

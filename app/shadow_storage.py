@@ -161,6 +161,20 @@ class ShadowStore:
             row.pop("settlement_id", None)
         return unsettled, sum(row._mapping["settlement_id"] is not None for row in rows)
 
+    def persisted_event_identity_evidence(self, event_ids: set[str]) -> dict:
+        """Read scheduler metadata that may identify opaque observation events."""
+        if not event_ids:
+            return {"slots": [], "executions": []}
+        with self.engine.connect() as connection:
+            slots = [dict(row._mapping) for row in connection.execute(
+                select(scheduler_slots).where(scheduler_slots.c.event_id.in_(event_ids)))]
+            # Execution JSON has no relational event key. Read it without locks
+            # and let the audit retain only explicitly allowlisted identity fields.
+            executions = [dict(row._mapping) for row in connection.execute(select(
+                scheduler_executions.c.execution_id, scheduler_executions.c.started_at_utc,
+                scheduler_executions.c.ended_at_utc, scheduler_executions.c.details))]
+        return {"slots": slots, "executions": executions}
+
     def insert_settlements(self, rows: list[dict], *, connection=None) -> None:
         """Insert a settlement batch atomically; the PK is the final race guard."""
         if connection is not None:

@@ -8,7 +8,8 @@ from app.research import ResearchRepository
 from app.settlement import SettlementCycle
 from app.settlement_audit import audit_settlement_identities
 from app.settlement_identity import resolve_settlement_game
-from app.shadow_storage import ShadowStore, observations, settlements
+from app.shadow_storage import (ShadowStore, observations, scheduler_executions,
+                                scheduler_slots, settlements)
 
 NOW = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
 # nflverse's 20:00 Eastern kickoff falls after midnight UTC during EDT.
@@ -224,3 +225,47 @@ def test_read_only_audit_reports_mapping_and_does_not_change_observation(store):
     assert audit["events"][0]["candidate_nflverse_game_id"] == "2026_01_MIA_BUF"
     assert audit["events"][0]["identity_verified"] is True
     assert store.all() == before and settlement_rows(store) == []
+
+
+def test_read_only_audit_recovers_opaque_provider_id_only_from_persisted_scheduler_evidence(store):
+    opaque = "17885cb8dcade8f6c3bce14b2de805e8"
+    row = observation(game=opaque)
+    row["team"] = row["opponent"] = None
+    row["source_observation_ids"] = {"hardrock": f"{opaque}:hardrockbet:player_pass_yds:Safe Player"}
+    add(store, row)
+    details = {"completed": [{"event_id": opaque, "kickoff_utc": KICKOFF.isoformat(),
+        "slot": "90m", "target_time_utc": (KICKOFF-timedelta(minutes=90)).isoformat()}],
+        "rejected_props": [{"provider_event_id": opaque, "canonical_event": "nfl:buf:mia"}]}
+    with store.engine.begin() as connection:
+        connection.execute(insert(scheduler_slots), {"event_id": opaque, "slot": "90m",
+            "target_time_utc": KICKOFF-timedelta(minutes=90), "status": "completed", "attempts": 1,
+            "reason": None, "updated_at_utc": NOW})
+        connection.execute(insert(scheduler_executions), {"execution_id": "execution-1",
+            "started_at_utc": NOW, "ended_at_utc": NOW, "details": details})
+    before = store.all()
+    audit = audit_settlement_identities(store=store, nflverse=FootballOnly(
+        game_id="2026_01_MIA_BUF"), now=NOW)
+    event = audit["events"][0]
+    assert event["provider_source_event_ids"] == [opaque]
+    assert event["persisted_canonical_events"] == ["nfl:buf:mia"]
+    assert event["candidate_nflverse_game_id"] == "2026_01_MIA_BUF"
+    assert event["match_method"] == "persisted_scheduler_canonical_event_and_kickoff"
+    assert event["identity_verified"] is True and len(event["evidence_chain"]) == 4
+    assert store.all() == before and settlement_rows(store) == []
+
+
+def test_read_only_audit_does_not_recover_opaque_id_from_kickoff_slot_or_source_id_alone(store):
+    opaque = "1edfa5ceaa1ad2cb57df1c1b908731f6"
+    row = observation(game=opaque)
+    row["team"] = row["opponent"] = None
+    row["source_observation_ids"] = {"hardrock": f"{opaque}:hardrockbet:market:Player"}
+    add(store, row)
+    with store.engine.begin() as connection:
+        connection.execute(insert(scheduler_slots), {"event_id": opaque, "slot": "90m",
+            "target_time_utc": KICKOFF-timedelta(minutes=90), "status": "completed", "attempts": 1,
+            "reason": None, "updated_at_utc": NOW})
+    audit = audit_settlement_identities(store=store, nflverse=FootballOnly(), now=NOW)
+    event = audit["events"][0]
+    assert event["provider_source_event_ids"] == [opaque] and event["capture_slots"]
+    assert event["identity_verified"] is False
+    assert event["failure_reason"] == "persisted_team_identity_not_found"
