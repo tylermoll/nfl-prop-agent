@@ -110,3 +110,25 @@ Known gaps include reliable historical route participation, proprietary
 charting/coverage/alignment, consistently timestamped injury/depth publication,
 and complete older snap/air-yard data. They remain null or behind provider
 contracts rather than being inferred from future information.
+
+## Read-only settled research and player history
+
+`python -m scripts.export_settled_research --date 2026-09-13 --output /tmp/settled-2026-09-13.csv`
+exports a UTC kickoff slate; use a `.json` suffix or `--format json` for JSON. It
+reads `DATABASE_URL`, joins only immutable `shadow_settlements`, and makes no
+provider calls. Repeated observations are selected nearest their named 24h,
+6h, 90m, and optional 15m targets. Missing windows and context remain null.
+Line movement is retained separately in every window.
+
+`app.player_history.build_player_history` creates one nflverse player/game row
+with passing/receiving/reception outcomes, opportunity metrics, score/spread,
+venue/weather, and explicitly available historical context. Its
+`contextual_splits` helper provides N, hits, descriptive hit rate, mean, median,
+sample standard deviation, threshold, and prominent small-N warnings. This is
+research/V2-V3 discovery only and is not imported by the production pipeline.
+
+The discretionary `research_selection_journal` is append-only and independent
+of recommendations and wagering. Nothing is backfilled. Before deployment,
+apply `migrations/20260914_research_history.sql`; then deploy the application
+and run the existing settlement schedule. Existing settlement rows are not
+rewritten; their immutable observation remains the legacy price authority.
