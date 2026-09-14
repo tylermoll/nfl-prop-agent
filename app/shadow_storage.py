@@ -22,9 +22,19 @@ observations = Table("shadow_observations", metadata,
     Column("context", JSON, nullable=False), Column("confirmation_flags", JSON, nullable=False), Column("research_config", JSON, nullable=False))
 settlements = Table("shadow_settlements", metadata,
     Column("observation_id", String(36), primary_key=True), Column("settled_at_utc", DateTime(timezone=True), nullable=False),
-    Column("actual_value", Float, nullable=False), Column("result", String, nullable=False),
+    Column("actual_value", Float, nullable=False), Column("line", Float), Column("side", String),
+    Column("result", String, nullable=False),
     Column("profit_loss_per_dollar", Float, nullable=False), Column("fixed_unit", Float, nullable=False),
-    Column("fixed_unit_profit_loss", Float, nullable=False), Column("result_source_id", String))
+    Column("fixed_unit_profit_loss", Float, nullable=False), Column("american_odds", Integer),
+    Column("result_source_id", String))
+# Deliberately separate from observations and execution.  Rows are decisions
+# made by a person at a point in time and, like observations, are never updated.
+selection_journal = Table("research_selection_journal", metadata,
+    Column("journal_id", String(36), primary_key=True),
+    Column("observation_id", String(36), nullable=False, index=True),
+    Column("selected", Boolean, nullable=False), Column("intended_stake", Float),
+    Column("selected_at_utc", DateTime(timezone=True), nullable=False),
+    Column("reason_codes", JSON, nullable=False), Column("note", String))
 scheduler_slots = Table("shadow_capture_slots", metadata,
     Column("event_id", String, nullable=False), Column("slot", String, nullable=False),
     Column("target_time_utc", DateTime(timezone=True), nullable=False), Column("status", String, nullable=False),
@@ -158,6 +168,12 @@ class ShadowStore:
             return
         with self.engine.begin() as owned:
             owned.execute(insert(settlements), rows)
+
+    def append_selection(self, row: dict) -> None:
+        """Append a discretionary research decision; there is no update API."""
+        allowed = {column.name for column in selection_journal.columns}
+        with self.engine.begin() as connection:
+            connection.execute(insert(selection_journal), {k: v for k, v in row.items() if k in allowed})
 
     def slot_state(self, event_id: str, slot: str, target_time: datetime) -> dict | None:
         with self.engine.connect() as c:

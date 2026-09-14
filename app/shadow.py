@@ -105,5 +105,7 @@ def settle_observations(observations: list[dict], realized_statistics: list[dict
         output.append({"observation_id": row["observation_id"], "settled_at_utc": settled_at,
                        **settle(result["actual_value"], row["line"], row["side"],
                                 row["hard_rock_offered_odds"], unit),
+                       "line": row["line"], "side": row["side"],
+                       "american_odds": row["hard_rock_offered_odds"],
                        "result_source_id": result.get("result_source_id")})
     return output

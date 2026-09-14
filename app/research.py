@@ -15,7 +15,8 @@ from app.config import settings
 from app.research_dashboard import DASHBOARD_HTML
 from app.pregame_context import evaluate_context
 from app.shadow_storage import (normalize_database_url, observations, pregame_context_snapshots,
-                                scheduler_executions, scheduler_slots, settlements)
+                                scheduler_executions, scheduler_slots, settlements, selection_journal)
+from app.research_export import calibration_table, edge_bucket, performance_summary
 
 router = APIRouter(prefix="/research", tags=["research"])
 _SECRET_KEY = re.compile(r"(?i)(secret|password|credential|authorization|api[_-]?key|private[_-]?key|raw[_-]?payload)")
@@ -54,7 +55,7 @@ class ResearchRepository:
             return [execution_view(dict(row._mapping)) for row in conn.execute(query)]
 
     def observation_query(self, filters: dict[str, Any]):
-        query = select(observations, *[c for c in settlements.c if c.name != "observation_id"]).outerjoin(
+        query = select(observations, *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]).outerjoin(
             settlements, observations.c.observation_id == settlements.c.observation_id
         )
         clauses = []
@@ -133,6 +134,37 @@ class ResearchRepository:
                 observations.c.observed_at_utc, observations.c.observation_id)).all()
         return [observation_view(dict(item._mapping), detail=False) for item in rows]
 
+    def historical_performance(self) -> dict:
+        joined = observations.join(settlements, observations.c.observation_id == settlements.c.observation_id)
+        with self.engine.connect() as conn:
+            rows = [dict(r._mapping) for r in conn.execute(select(observations,
+                *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]).select_from(joined))]
+            journals = [dict(r._mapping) for r in conn.execute(select(selection_journal))]
+        enriched = []
+        for source in rows:
+            ref, flags = source.get("reference_context") or {}, source.get("confirmation_flags") or {}
+            enriched.append(dict(source, model_edge_bucket=edge_bucket(source["raw_probability_edge_pp"]),
+                capture_window=(source.get("context") or {}).get("capture_slot"),
+                confirmation_status="confirmed" if flags.get("both_agree") else "conflicted" if flags.get("both_disagree") else "available",
+                reference_book_coverage=ref.get("reference_book_count"),
+                evidence_quality=(source.get("context") or {}).get("evidence_quality")))
+        latest = {item["observation_id"]: item for item in journals}
+        selected = [row for row in enriched if latest.get(row["observation_id"], {}).get("selected")]
+        dimensions = ("model_edge_bucket", "canonical_market", "side", "capture_window",
+                      "confirmation_status", "reference_book_coverage", "evidence_quality")
+        return {"by_dimensions": performance_summary(enriched, dimensions),
+                "by_edge_bucket": performance_summary(enriched, ("model_edge_bucket",)),
+                "by_market": performance_summary(enriched, ("canonical_market",)),
+                "by_side": performance_summary(enriched, ("side",)),
+                "by_capture_window": performance_summary(enriched, ("capture_window",)),
+                "by_confirmation_status": performance_summary(enriched, ("confirmation_status",)),
+                "by_reference_coverage": performance_summary(enriched, ("reference_book_coverage",)),
+                "by_evidence_quality": performance_summary(enriched, ("evidence_quality",)),
+                "calibration": calibration_table(enriched),
+                "selection_comparison": None if len(selected) < 10 else {
+                    "selected": performance_summary(selected)[0], "model_only": performance_summary(enriched)[0]},
+                "selection_note": "At least 10 settled journal selections are required." if len(selected) < 10 else None}
+
 
 @lru_cache
 def get_repository() -> ResearchRepository:
@@ -190,7 +222,9 @@ def observation_view(row: dict, *, detail: bool) -> dict:
         "confirmation_flags": sanitize(row.get("confirmation_flags") or {}), "settlement_status": "settled" if settled else "unsettled",
         "settlement": ({"settled_at_utc": _utc(row["settled_at_utc"]), "actual_value": row.get("actual_value"),
                         "result": row.get("result"), "paper_profit_loss_per_dollar": row.get("profit_loss_per_dollar"),
-                        "paper_fixed_unit": row.get("fixed_unit"), "paper_profit_loss": row.get("fixed_unit_profit_loss")}
+                        "paper_fixed_unit": row.get("fixed_unit"), "paper_profit_loss": row.get("fixed_unit_profit_loss"),
+                        "american_odds_payout_used": (row.get("american_odds") if row.get("american_odds") is not None
+                                                       else row.get("hard_rock_offered_odds"))}
                        if settled else None)}
     if detail:
         result["provenance"] = {"source_observation_ids": sanitize(row.get("source_observation_ids") or {}),
@@ -281,7 +315,7 @@ def summary(repo: ResearchRepository = Depends(get_repository)):
     today = datetime.now(timezone.utc).date()
     with repo.engine.connect() as conn:
         rows = [dict(r._mapping) for r in conn.execute(select(
-            observations, *[c for c in settlements.c if c.name != "observation_id"]
+            observations, *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]
         ).outerjoin(settlements, observations.c.observation_id == settlements.c.observation_id))]
         slots = list(conn.execute(select(scheduler_slots.c.status)))
         executions = repo.executions(200, 0)
@@ -303,6 +337,10 @@ def summary(repo: ResearchRepository = Depends(get_repository)):
         "performance_metrics": _performance(rows),
         "performance_note": (None if settled_count else
                              "Performance metrics will appear after prospective observations are settled.")}
+
+@router.get("/historical-performance")
+def historical_performance(repo: ResearchRepository = Depends(get_repository)):
+    return repo.historical_performance()
 
 
 @router.get("", response_class=HTMLResponse, include_in_schema=False)
