@@ -5,12 +5,12 @@ import json
 
 from app.config import settings
 from app.historical.ingestion import NflverseClient
-from app.settlement_audit import audit_settlement_identities
+from app.settlement_residual_audit import audit_settlement_identities_with_residual_bijection
 from app.shadow_storage import ShadowStore
 
 
 def run_audit() -> dict:
-    return audit_settlement_identities(
+    return audit_settlement_identities_with_residual_bijection(
         store=ShadowStore(settings.database_url),
         nflverse=NflverseClient(settings.settlement_cache_dir),
         refresh=settings.settlement_nflverse_refresh,
