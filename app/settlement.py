@@ -14,7 +14,8 @@ from app.historical.features import MARKETS
 from app.historical.normalize import normalize_schedules, normalize_weekly
 from app.identities import canonical_team
 from app.scheduler import sanitized_error
-from app.settlement_identity import resolve_settlement_game
+from app.settlement_identity import KICKOFF_TOLERANCE, resolve_settlement_game, utc_datetime
+from app.settlement_residual_audit import audit_settlement_identities_with_residual_bijection
 from app.shadow import settle_observations
 
 _LOCAL_LOCK = Lock()
@@ -68,7 +69,9 @@ class SettlementCycle:
             "unsettled_observations_inspected": 0, "games_represented": 0, "games_final": 0,
             "games_results_not_available": 0, "observations_settled": 0, "wins": 0,
             "losses": 0, "pushes": 0, "settlement_failures": 0,
-            "skipped_already_settled_rows": 0, "paper_profit_loss": 0.0, "errors": []}
+            "skipped_already_settled_rows": 0, "paper_profit_loss": 0.0,
+            "identity_audit_verified_groups": 0, "identity_audit_total_groups": 0,
+            "identity_audit_residual_groups": 0, "errors": []}
         with settlement_lock(self.store.engine) as acquired:
             if not acquired:
                 report["errors"].append({"kind": "overlapping_execution", "message": "settlement execution already active"})
@@ -80,10 +83,29 @@ class SettlementCycle:
                 if not candidates:
                     return self._finish(report)
                 schedules = normalize_schedules(self.nflverse.fetch("schedules", refresh=self.refresh))
+
+                # Reuse the exact read-only identity proof that operators audit before settlement.
+                # The refreshed schedule is already in the nflverse cache, so refresh=False here
+                # performs no second provider refresh/network purchase.
+                identity_audit = audit_settlement_identities_with_residual_bijection(
+                    store=self.store, nflverse=self.nflverse, refresh=False, now=started)
+                report["identity_audit_verified_groups"] = int(
+                    identity_audit.get("verified_event_kickoff_groups", 0))
+                report["identity_audit_total_groups"] = int(identity_audit.get("event_kickoff_groups", 0))
+                report["identity_audit_residual_groups"] = int(identity_audit.get("residual_bijection_groups", 0))
+                audited_games = {
+                    (str(event["observation_event_identity"]), str(event["observation_kickoff_utc"])):
+                        str(event["candidate_nflverse_game_id"])
+                    for event in identity_audit.get("events", [])
+                    if event.get("identity_verified") and event.get("candidate_nflverse_game_id")
+                }
+
                 resolved: list[tuple[dict, pd.Series]] = []
                 games: dict[str, pd.Series] = {}
                 for observation in candidates:
                     game = self._exact_game(observation, schedules)
+                    if game is None:
+                        game = self._audited_game(observation, schedules, audited_games)
                     if game is None:
                         self._failure(report, "event_identity_not_exact")
                         continue
@@ -138,6 +160,29 @@ class SettlementCycle:
     def _exact_game(observation: dict, schedules: pd.DataFrame) -> pd.Series | None:
         resolution = resolve_settlement_game(observation, schedules)
         return resolution.game if resolution.identity_verified else None
+
+    @staticmethod
+    def _audited_game(observation: dict, schedules: pd.DataFrame,
+                      audited_games: dict[tuple[str, str], str]) -> pd.Series | None:
+        """Use only a game ID already proven by the read-only identity audit."""
+        try:
+            kickoff = utc_datetime(observation["kickoff_utc"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        key = (str(observation.get("game_id", "")), kickoff.isoformat())
+        candidate_id = audited_games.get(key)
+        if candidate_id is None:
+            return None
+        rows = schedules[schedules.game_id.astype(str) == candidate_id]
+        if len(rows) != 1:
+            return None
+        game = rows.iloc[0]
+        try:
+            if abs(utc_datetime(game.kickoff) - kickoff) > KICKOFF_TOLERANCE:
+                return None
+        except (TypeError, ValueError):
+            return None
+        return game
 
     @staticmethod
     def _exact_result(observation: dict, game: pd.Series, weekly: pd.DataFrame) -> dict | None:
