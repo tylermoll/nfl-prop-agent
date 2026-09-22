@@ -8,7 +8,8 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.research import ResearchRepository, get_repository
 from app.shadow_storage import (metadata, observations, pregame_context_snapshots,
-                                scheduler_executions, scheduler_slots, selection_journal, settlements)
+                                opportunity_decisions, scheduler_executions, scheduler_slots,
+                                selection_journal, settlements)
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -220,6 +221,42 @@ def test_only_selected_true_settlements_contribute_to_strategy_performance(resea
     assert (performance["wins"], performance["losses"], performance["pushes"]) == (1, 0, 0)
     assert performance["paper_profit_loss"] == pytest.approx(9.09)
     assert performance["realized_roi"] == pytest.approx(.909)
+
+
+def test_canonical_decisions_count_select_once_and_exclude_pass(research_client):
+    client, engine, _ = research_client
+    over = observation_row("canonical-over", side="over")
+    under = observation_row("canonical-under", side="under", model_probability=.44)
+    with engine.begin() as conn:
+        conn.execute(insert(observations), [over, under])
+        conn.execute(insert(settlements), [
+            {"observation_id": "canonical-over", "settled_at_utc": NOW, "actual_value": 270,
+             "result": "win", "profit_loss_per_dollar": .909, "fixed_unit": 10,
+             "fixed_unit_profit_loss": 9.09},
+            {"observation_id": "canonical-under", "settled_at_utc": NOW, "actual_value": 270,
+             "result": "loss", "profit_loss_per_dollar": -1, "fixed_unit": 10,
+             "fixed_unit_profit_loss": -10}])
+        base = {"exposure_id": "exposure", "over_observation_id": "canonical-over",
+            "under_observation_id": "canonical-under", "decided_at_utc": NOW,
+            "policy_name": "integrity", "policy_version": "v1",
+            "input_schema_version": "v1", "input_digest": "a" * 64}
+        conn.execute(insert(opportunity_decisions), [
+            {**base, "decision_id": "select", "opportunity_id": "opportunity-select",
+             "selected_observation_id": "canonical-over", "action": "SELECT_OVER",
+             "intended_stake": 10, "reason_codes": ["SELECT_POLICY_ELIGIBLE"]},
+            {**base, "decision_id": "pass", "opportunity_id": "opportunity-pass",
+             "selected_observation_id": None, "action": "PASS", "intended_stake": None,
+             "reason_codes": ["PASS_WINDOW_NOT_ELIGIBLE"]}])
+        # A compatibility journal row for the same selected observation must not
+        # duplicate canonical P&L once V2 decisions exist.
+        conn.execute(insert(selection_journal), {"journal_id": "legacy-duplicate",
+            "observation_id": "canonical-over", "selected": True, "intended_stake": 10,
+            "selected_at_utc": NOW, "reason_codes": ["model_edge"]})
+    summary = client.get("/research/summary").json()
+    assert summary["strategy_performance"]["selected_count"] == 1
+    assert summary["strategy_performance"]["paper_profit_loss"] == 9.09
+    assert summary["selection_decisions"] == {"selected_count": 1, "pass_count": 1,
+        "pass_reason_counts": {"PASS_WINDOW_NOT_ELIGIBLE": 1}}
 
 
 def test_research_has_no_mutation_routes(research_client):

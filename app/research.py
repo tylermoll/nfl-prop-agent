@@ -15,7 +15,8 @@ from app.config import settings
 from app.research_dashboard import DASHBOARD_HTML
 from app.pregame_context import evaluate_context
 from app.shadow_storage import (normalize_database_url, observations, pregame_context_snapshots,
-                                scheduler_executions, scheduler_slots, settlements, selection_journal)
+                                opportunity_decisions, scheduler_executions, scheduler_slots,
+                                settlements, selection_journal)
 from app.research_export import calibration_table, edge_bucket, performance_summary
 
 router = APIRouter(prefix="/research", tags=["research"])
@@ -139,7 +140,8 @@ class ResearchRepository:
         with self.engine.connect() as conn:
             rows = [dict(r._mapping) for r in conn.execute(select(observations,
                 *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]).select_from(joined))]
-            journals = [dict(r._mapping) for r in conn.execute(select(selection_journal))]
+            journals = [dict(r._mapping) for r in conn.execute(select(selection_journal).order_by(
+                selection_journal.c.selected_at_utc, selection_journal.c.journal_id))]
         enriched = []
         for source in rows:
             ref, flags = source.get("reference_context") or {}, source.get("confirmation_flags") or {}
@@ -346,14 +348,32 @@ def summary(repo: ResearchRepository = Depends(get_repository)):
             observations, *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]
         ).outerjoin(settlements, observations.c.observation_id == settlements.c.observation_id))]
         slots = list(conn.execute(select(scheduler_slots.c.status)))
-        selected_count = conn.execute(select(selection_journal.c.journal_id).where(
-            selection_journal.c.selected.is_(True))).all()
-        selected_join = (selection_journal.join(observations,
-            selection_journal.c.observation_id == observations.c.observation_id).join(
-            settlements, selection_journal.c.observation_id == settlements.c.observation_id))
-        selected_rows = [dict(r._mapping) for r in conn.execute(select(
+        canonical_decision_ids = conn.execute(select(opportunity_decisions.c.decision_id)).all()
+        canonical_ids = conn.execute(select(opportunity_decisions.c.decision_id).where(
+            opportunity_decisions.c.action != "PASS")).all()
+        canonical_join = (opportunity_decisions.join(observations,
+            opportunity_decisions.c.selected_observation_id == observations.c.observation_id).join(
+            settlements, opportunity_decisions.c.selected_observation_id == settlements.c.observation_id))
+        canonical_rows = [dict(r._mapping) for r in conn.execute(select(
             observations, *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]
-        ).select_from(selected_join).where(selection_journal.c.selected.is_(True)))]
+        ).select_from(canonical_join).where(opportunity_decisions.c.action != "PASS"))]
+        journals = [dict(row._mapping) for row in conn.execute(select(selection_journal).order_by(
+            selection_journal.c.selected_at_utc, selection_journal.c.journal_id))]
+        latest_journal = {row["observation_id"]: row for row in journals}
+        legacy_selected_ids = sorted(observation_id for observation_id, row in latest_journal.items()
+                                     if row["selected"])
+        if canonical_decision_ids:
+            selected_count, selected_rows = len(canonical_ids), canonical_rows
+        else:
+            selected_count = len(legacy_selected_ids)
+            legacy_join = observations.join(settlements,
+                observations.c.observation_id == settlements.c.observation_id)
+            selected_rows = ([dict(r._mapping) for r in conn.execute(select(
+                observations, *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]
+            ).select_from(legacy_join).where(observations.c.observation_id.in_(legacy_selected_ids)))]
+                if legacy_selected_ids else [])
+        pass_rows = [dict(row._mapping) for row in conn.execute(select(
+            opportunity_decisions.c.reason_codes).where(opportunity_decisions.c.action == "PASS"))]
         executions = repo.executions(200, 0)
     settled_count = sum(r["settled_at_utc"] is not None for r in rows)
     successful = next((e for e in executions if e["completed_count"] > 0), None)
@@ -371,7 +391,10 @@ def summary(repo: ResearchRepository = Depends(get_repository)):
         "latest_scheduler_execution_timestamp": latest["started_at_utc"] if latest else None,
         "latest_quota_state": ({"before": latest["quota_before"], "after": latest["quota_after"]} if latest else None),
         "model_evaluation": _model_evaluation(rows),
-        "strategy_performance": _strategy_performance(selected_rows, len(selected_count))}
+        "strategy_performance": _strategy_performance(selected_rows, selected_count),
+        "selection_decisions": {"selected_count": selected_count, "pass_count": len(pass_rows),
+            "pass_reason_counts": dict(Counter(code for row in pass_rows
+                                                for code in (row.get("reason_codes") or [])))}}
 
 @router.get("/historical-performance")
 def historical_performance(repo: ResearchRepository = Depends(get_repository)):

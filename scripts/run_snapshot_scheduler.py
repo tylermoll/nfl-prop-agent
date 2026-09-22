@@ -6,6 +6,7 @@ from app.config import settings
 from app.providers.kalshi import KalshiProvider
 from app.providers.the_odds_api import TheOddsApiProvider
 from app.scheduler import CaptureWindow, SchedulerConfig, SnapshotScheduler
+from app.shadow_selection import SelectionPolicyConfig, decide_capture
 from app.shadow_storage import ShadowStore
 
 def parser() -> argparse.ArgumentParser:
@@ -34,8 +35,22 @@ async def run_scheduler(*, dry_run: bool = False, pipeline: str | None = None) -
         max_games_per_execution=settings.scheduler_max_games_per_run, retry_budget=settings.scheduler_retry_budget,
         provider_stale_after=timedelta(seconds=settings.scheduler_provider_stale_seconds),
         model_stale_after=timedelta(seconds=settings.scheduler_model_stale_seconds))
-    scheduler = SnapshotScheduler(odds=TheOddsApiProvider(), store=ShadowStore(settings.database_url),
-        kalshi=KalshiProvider(fetch_order_books=False), load_model=loader, build_observations=builder, config=config)
+    store = ShadowStore(settings.database_url)
+    selector = None
+    if settings.shadow_selection_eligible_window:
+        policy = SelectionPolicyConfig(settings.shadow_selection_policy_name,
+            settings.shadow_selection_policy_version, settings.shadow_selection_eligible_window,
+            nominal_unit=settings.shadow_nominal_unit)
+        def selector(rows, selected_store, decided_at):
+            decisions, failures = decide_capture(rows, policy, decided_at_utc=decided_at,
+                exposure_is_selected=selected_store.exposure_has_selection)
+            if failures:
+                codes = sorted({code for failure in failures for code in failure.reason_codes})
+                raise ValueError(f"selection opportunity integrity failure: {','.join(codes)}")
+            return [decision.as_row() for decision in decisions]
+    scheduler = SnapshotScheduler(odds=TheOddsApiProvider(), store=store,
+        kalshi=KalshiProvider(fetch_order_books=False), load_model=loader, build_observations=builder,
+        select_decisions=selector, config=config)
     return await scheduler.run(dry_run=dry_run)
 
 async def main() -> int:

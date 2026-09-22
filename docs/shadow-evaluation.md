@@ -68,3 +68,24 @@ quota permits. Deduplicate polling schedules, query only eligible unstarted
 events, retain quota response headers, and reduce cadence rather than exceed the
 account's current quota. Kalshi collection can accompany these read-only runs;
 never infer missing exact thresholds or substitute its midpoint for execution.
+
+## V2 prospective decision infrastructure
+
+`app.shadow_selection` is the sole direction adapter for prospective policy
+inputs. Persisted `model_probability` remains offered-side probability;
+reference probability remains canonical OVER; and Kalshi midpoint remains
+canonical YES/threshold-reaching probability. The adapter exposes explicit
+OVER, UNDER, offered-side, YES, and NO names before any numeric comparison.
+
+An exact snapshot opportunity pairs one OVER and one UNDER observation using
+stable event/player/market/line, capture target, and source identity. A separate
+exposure identity omits line and capture window, preventing routine 24h, 6h,
+90m, and 15m snapshots from becoming independent paper positions. Decisions
+are `SELECT_OVER`, `SELECT_UNDER`, or `PASS`, use a fixed $10 unit when selected,
+and are persisted in `shadow_opportunity_decisions` in the same transaction as
+the observations and completed capture slot.
+
+Decision writes are disabled by default. `SHADOW_SELECTION_ELIGIBLE_WINDOW`
+must be set prospectively to exactly one scheduler window before the scheduler
+constructs the policy. No migration backfills V1 observations or journal rows,
+and later weather/injury/role context is not a Phase 1 selection input.

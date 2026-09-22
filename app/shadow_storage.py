@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, MetaData, String, Table, UniqueConstraint, create_engine, insert, select, update
+from sqlalchemy import (JSON, Boolean, CheckConstraint, Column, DateTime, Float,
+                        ForeignKey, Index, Integer, MetaData, String, Table,
+                        UniqueConstraint, and_, create_engine, insert, select, update)
 from app.math_utils import american_to_decimal
 
 metadata = MetaData()
@@ -35,6 +37,31 @@ selection_journal = Table("research_selection_journal", metadata,
     Column("selected", Boolean, nullable=False), Column("intended_stake", Float),
     Column("selected_at_utc", DateTime(timezone=True), nullable=False),
     Column("reason_codes", JSON, nullable=False), Column("note", String))
+opportunity_decisions = Table("shadow_opportunity_decisions", metadata,
+    Column("decision_id", String(36), primary_key=True),
+    Column("opportunity_id", String(96), nullable=False),
+    Column("exposure_id", String(96), nullable=False),
+    Column("over_observation_id", String(36), ForeignKey("shadow_observations.observation_id"), nullable=False),
+    Column("under_observation_id", String(36), ForeignKey("shadow_observations.observation_id"), nullable=False),
+    Column("selected_observation_id", String(36), ForeignKey("shadow_observations.observation_id")),
+    Column("action", String(16), nullable=False), Column("intended_stake", Float),
+    Column("decided_at_utc", DateTime(timezone=True), nullable=False),
+    Column("reason_codes", JSON, nullable=False), Column("policy_name", String, nullable=False),
+    Column("policy_version", String, nullable=False), Column("input_schema_version", String, nullable=False),
+    Column("input_digest", String(64), nullable=False),
+    UniqueConstraint("opportunity_id", "policy_name", "policy_version", name="uq_shadow_opportunity_policy"),
+    CheckConstraint("action IN ('SELECT_OVER','SELECT_UNDER','PASS')", name="ck_shadow_decision_action"),
+    CheckConstraint("over_observation_id <> under_observation_id", name="ck_shadow_decision_distinct_sides"),
+    CheckConstraint("selected_observation_id IS NULL OR selected_observation_id IN (over_observation_id, under_observation_id)",
+                    name="ck_shadow_decision_selected_member"),
+    CheckConstraint("(action = 'PASS' AND selected_observation_id IS NULL AND intended_stake IS NULL) OR "
+                    "(action = 'SELECT_OVER' AND selected_observation_id = over_observation_id AND intended_stake = 10.0) OR "
+                    "(action = 'SELECT_UNDER' AND selected_observation_id = under_observation_id AND intended_stake = 10.0)",
+                    name="ck_shadow_decision_action_payload"))
+Index("uq_shadow_selected_exposure_policy", opportunity_decisions.c.exposure_id,
+      opportunity_decisions.c.policy_name, opportunity_decisions.c.policy_version, unique=True,
+      postgresql_where=opportunity_decisions.c.action != "PASS",
+      sqlite_where=opportunity_decisions.c.action != "PASS")
 scheduler_slots = Table("shadow_capture_slots", metadata,
     Column("event_id", String, nullable=False), Column("slot", String, nullable=False),
     Column("target_time_utc", DateTime(timezone=True), nullable=False), Column("status", String, nullable=False),
@@ -118,6 +145,42 @@ class ShadowStore:
                     scheduler_slots.c.target_time_utc == slot_row["target_time_utc"]).values(**slot_row))
             else:
                 connection.execute(insert(scheduler_slots), slot_row)
+
+    def complete_capture_with_decisions(self, rows: list[dict], decision_rows: list[dict], slot_row: dict) -> None:
+        """Atomically append observations/decisions and complete one capture.
+
+        Opportunity and selected-exposure uniqueness make overlapping workers
+        safe. Replaying an already-committed slot is an idempotent no-op; any
+        other constraint or insert failure rolls the complete transaction back.
+        """
+        observation_columns = {column.name for column in observations.columns}
+        decision_columns = {column.name for column in opportunity_decisions.columns}
+        with self.engine.begin() as connection:
+            existing_slot = connection.execute(select(scheduler_slots).where(
+                scheduler_slots.c.event_id == slot_row["event_id"],
+                scheduler_slots.c.slot == slot_row["slot"],
+                scheduler_slots.c.target_time_utc == slot_row["target_time_utc"])).first()
+            if existing_slot and existing_slot._mapping["status"] == "completed":
+                return
+            for row in rows:
+                connection.execute(insert(observations), {k: v for k, v in row.items() if k in observation_columns})
+            for row in decision_rows:
+                connection.execute(insert(opportunity_decisions), {k: v for k, v in row.items() if k in decision_columns})
+            if existing_slot:
+                connection.execute(update(scheduler_slots).where(
+                    scheduler_slots.c.event_id == slot_row["event_id"],
+                    scheduler_slots.c.slot == slot_row["slot"],
+                    scheduler_slots.c.target_time_utc == slot_row["target_time_utc"]).values(**slot_row))
+            else:
+                connection.execute(insert(scheduler_slots), slot_row)
+
+    def exposure_has_selection(self, exposure_id: str, policy_name: str, policy_version: str) -> bool:
+        with self.engine.connect() as connection:
+            return connection.execute(select(opportunity_decisions.c.decision_id).where(and_(
+                opportunity_decisions.c.exposure_id == exposure_id,
+                opportunity_decisions.c.policy_name == policy_name,
+                opportunity_decisions.c.policy_version == policy_version,
+                opportunity_decisions.c.action != "PASS"))).first() is not None
     def all(self) -> list[dict]:
         with self.engine.connect() as connection:
             return [dict(r._mapping) for r in connection.execute(select(observations).order_by(observations.c.observed_at_utc))]
