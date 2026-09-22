@@ -8,24 +8,35 @@ from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from app.shadow import make_observation
-from app.shadow_selection import SelectionPolicyConfig, build_opportunity, decide
+from app.shadow_selection import (FROZEN_POLICY_NAME, FROZEN_POLICY_VERSION,
+                                  MODEL_VERSION_ALLOWLIST, SelectionPolicyConfig,
+                                  build_opportunity, decide)
 from app.shadow_storage import (ShadowStore, observations, opportunity_decisions,
                                 scheduler_slots)
 
 NOW = datetime(2026, 9, 22, 12, tzinfo=timezone.utc)
 KICKOFF = NOW + timedelta(hours=2)
-CONFIG = SelectionPolicyConfig("integrity", "v1", "90m")
+CONFIG = SelectionPolicyConfig(FROZEN_POLICY_NAME, FROZEN_POLICY_VERSION, "90m")
 
 
 def observation(side, *, line=249.5, slot="90m"):
     score = SimpleNamespace(over_probability=.60, under_probability=.40,
-        model_version="model-v1", point_prediction=260.0,
-        feature_built_at_utc=NOW-timedelta(minutes=5), uncertainty_method="residual",
-        uncertainty_version="u1", residual_bucket=1, uncertainty_scale=15.0)
+        model_version=MODEL_VERSION_ALLOWLIST["player_pass_yds"], point_prediction=260.0,
+        feature_built_at_utc=NOW-timedelta(minutes=5),
+        uncertainty_method="shrunk_prediction_conditional_empirical_residual_ecdf",
+        uncertainty_version="2", residual_bucket=1, uncertainty_scale=15.0)
     return make_observation(observed_at_utc=NOW, kickoff_utc=KICKOFF, game_id="game",
         player_id="player", player_name="Player", team="BUF", opponent="MIA",
         canonical_market="player_pass_yds", line=line, side=side,
-        offered_odds=-110 if side == "over" else 150, model_score=score,
+        offered_odds=-110, model_score=score,
+        reference_context={"reference_book_count": 2,
+            "exact_threshold_over_no_vig_probability": .55,
+            "books": {name: {"over_odds": -110, "under_odds": -110,
+                "exact_threshold_over_no_vig_probability": .55}
+                for name in ("draftkings", "fanduel")}},
+        freshness={"provider_updated_at_utc": (NOW-timedelta(seconds=30)).isoformat(),
+                   "provider_age_seconds": 30, "provider_stale": False,
+                   "model_feature_age_seconds": 300, "model_stale": False},
         source_ids={"hardrock": "source"}, context={"capture_slot": slot,
             "capture_target_time_utc": NOW.isoformat()})
 
@@ -66,10 +77,8 @@ def test_one_decision_per_opportunity_and_one_select_per_exposure():
         with store.engine.begin() as connection:
             connection.execute(insert(opportunity_decisions), duplicate)
 
-    later_rows = [observation("over", line=250.5, slot="15m"),
-                  observation("under", line=250.5, slot="15m")]
-    later_config = SelectionPolicyConfig("integrity", "v1", "15m")
-    _, later = batch_decision(later_rows, later_config)
+    later_rows = [observation("over", line=250.5), observation("under", line=250.5)]
+    _, later = batch_decision(later_rows, CONFIG)
     with pytest.raises(IntegrityError):
         with store.engine.begin() as connection:
             connection.execute(insert(observations), later_rows)
@@ -111,7 +120,8 @@ def test_concurrent_selects_for_one_exposure_cannot_both_commit(tmp_path: Path):
 
 def test_pass_is_persisted_but_cannot_carry_selection_or_stake():
     store = ShadowStore("sqlite://")
-    rows, decision = batch_decision(config=SelectionPolicyConfig("integrity", "v1", "15m"))
+    rows = [observation("over", slot="15m"), observation("under", slot="15m")]
+    rows, decision = batch_decision(rows=rows)
     store.complete_capture_with_decisions(rows, [decision], slot())
     assert counts(store) == (2, 1, 1)
     assert decision["action"] == "PASS" and decision["intended_stake"] is None

@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     # V2 decision writes remain disabled while this is unset. Choosing a window
     # is an explicit prospective deployment decision, never a backtest result.
     shadow_selection_eligible_window: str | None = None
-    shadow_selection_policy_name: str = "integrity"
-    shadow_selection_policy_version: str = "v2-phase1"
+    shadow_selection_policy_name: str = "nfl_prop_v2"
+    shadow_selection_policy_version: str = "v2.0"
     settlement_cache_dir: str = "data/historical/raw"
     settlement_nflverse_refresh: bool = True
     scheduler_slots_minutes: tuple[int, ...] = (1440, 360, 90, 15)
@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     scheduler_retry_budget: int = 2
     scheduler_provider_stale_seconds: int = 300
     scheduler_model_stale_seconds: int = 3600
+    # Reserve one scheduler interval before the V2 freshness ceiling so the
+    # eligible capture can refresh and score without racing the hard gate.
+    shadow_selection_feature_refresh_headroom_seconds: int = 300
     football_artifact_player_pass_yds: str | None = None
     football_artifact_player_reception_yds: str | None = None
     football_artifact_player_receptions: str | None = None
