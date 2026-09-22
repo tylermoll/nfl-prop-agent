@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     # V2 decision writes remain disabled while this is unset. Choosing a window
     # is an explicit prospective deployment decision, never a backtest result.
     shadow_selection_eligible_window: str | None = None
-    shadow_selection_policy_name: str = "integrity"
-    shadow_selection_policy_version: str = "v2-phase1"
+    shadow_selection_policy_name: str = "nfl_prop_v2"
+    shadow_selection_policy_version: str = "v2.0"
     settlement_cache_dir: str = "data/historical/raw"
     settlement_nflverse_refresh: bool = True
     scheduler_slots_minutes: tuple[int, ...] = (1440, 360, 90, 15)
