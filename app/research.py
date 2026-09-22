@@ -243,10 +243,21 @@ def filter_params(market: str | None = None, player: str | None = None, event: s
     return locals()
 
 
-def _performance(rows: list[dict]) -> dict | None:
+def _strategy_performance(rows: list[dict], selected_count: int) -> dict:
+    """Aggregate only prospectively journaled selections.
+
+    ``rows`` must come from the selection -> observation -> settlement inner
+    join.  Keeping that boundary at the query makes it impossible for the two
+    raw sides captured for a market to silently become a betting record.
+    """
     settled_rows = [row for row in rows if row.get("settled_at_utc") is not None]
     if not settled_rows:
-        return None
+        return {"available": False, "status": ("awaiting_settlements" if selected_count
+                                                else "awaiting_selections"),
+                "selected_count": selected_count, "settled_count": 0,
+                "realized_roi": None,
+                "note": ("Selected observations have not settled yet." if selected_count else
+                         "No prospective strategy selections have been recorded yet.")}
 
     def aggregate(items: list[dict]) -> dict:
         outcomes = Counter(str(row.get("result") or "").lower() for row in items)
@@ -261,16 +272,33 @@ def _performance(rows: list[dict]) -> dict | None:
 
     result = aggregate(settled_rows)
     total_staked = sum(float(row.get("fixed_unit") or 0) for row in settled_rows)
-    result["realized_roi"] = result["paper_profit_loss"] / total_staked if total_staked else 0
-    result["brier_score"] = sum((float(row["model_probability"]) -
-                                 (1.0 if str(row.get("result")).lower() == "win" else
-                                  0.5 if str(row.get("result")).lower() == "push" else 0.0)) ** 2
-                                for row in settled_rows) / len(settled_rows)
+    result["realized_roi"] = result["paper_profit_loss"] / total_staked if total_staked else None
     result["settled_count"] = result.pop("count")
+    result.update({"available": True, "status": "available", "selected_count": selected_count})
     result["by_market"] = groups(lambda row: row["canonical_market"])
     result["by_edge_tier"] = groups(lambda row: row["edge_bucket"])
     result["by_capture_window"] = groups(lambda row: (row.get("context") or {}).get("capture_slot"))
     return result
+
+
+def _model_evaluation(rows: list[dict]) -> dict | None:
+    """Return calibration over raw settled side observations, never P&L.
+
+    OVER and UNDER are intentionally separate observations.  Their binary
+    Brier terms are mathematically valid model-calibration terms, although
+    paired terms are correlated and must not be described as independent bets.
+    Pushes have no binary event outcome and are excluded.
+    """
+    settled = [row for row in rows if row.get("settled_at_utc") is not None]
+    binary = [row for row in settled if str(row.get("result")).lower() in {"win", "loss"}
+              and row.get("model_probability") is not None]
+    return ({"evaluation_unit": "raw_side_observation", "settled_observation_count": len(settled),
+             "brier_observation_count": len(binary),
+             "brier_score": (sum((float(row["model_probability"]) -
+                                    (1.0 if str(row["result"]).lower() == "win" else 0.0)) ** 2
+                                   for row in binary) / len(binary) if binary else None),
+             "note": "Model calibration over raw settled side observations; paired sides are not a betting record."}
+            if settled else None)
 
 
 @router.get("/executions")
@@ -318,6 +346,14 @@ def summary(repo: ResearchRepository = Depends(get_repository)):
             observations, *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]
         ).outerjoin(settlements, observations.c.observation_id == settlements.c.observation_id))]
         slots = list(conn.execute(select(scheduler_slots.c.status)))
+        selected_count = conn.execute(select(selection_journal.c.journal_id).where(
+            selection_journal.c.selected.is_(True))).all()
+        selected_join = (selection_journal.join(observations,
+            selection_journal.c.observation_id == observations.c.observation_id).join(
+            settlements, selection_journal.c.observation_id == settlements.c.observation_id))
+        selected_rows = [dict(r._mapping) for r in conn.execute(select(
+            observations, *[c for c in settlements.c if c.name not in {"observation_id", "line", "side"}]
+        ).select_from(selected_join).where(selection_journal.c.selected.is_(True)))]
         executions = repo.executions(200, 0)
     settled_count = sum(r["settled_at_utc"] is not None for r in rows)
     successful = next((e for e in executions if e["completed_count"] > 0), None)
@@ -334,9 +370,8 @@ def summary(repo: ResearchRepository = Depends(get_repository)):
         "current_model_versions_observed": sorted({r["model_version"] for r in rows}),
         "latest_scheduler_execution_timestamp": latest["started_at_utc"] if latest else None,
         "latest_quota_state": ({"before": latest["quota_before"], "after": latest["quota_after"]} if latest else None),
-        "performance_metrics": _performance(rows),
-        "performance_note": (None if settled_count else
-                             "Performance metrics will appear after prospective observations are settled.")}
+        "model_evaluation": _model_evaluation(rows),
+        "strategy_performance": _strategy_performance(selected_rows, len(selected_count))}
 
 @router.get("/historical-performance")
 def historical_performance(repo: ResearchRepository = Depends(get_repository)):

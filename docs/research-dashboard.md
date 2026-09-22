@@ -4,8 +4,8 @@ The `/research` surface is a read-only, descriptive audit view over shadow
 observations, settlements, capture slots, and scheduler executions already in
 Postgres. It never calls an odds provider, Kalshi, a model, or a wagering API.
 These fields are research context, **not betting recommendations** or promises
-of performance. Performance metrics remain absent until persisted settlements
-exist.
+of performance. Raw settlements are model-evaluation data. Strategy performance
+remains unavailable until a prospectively selected journal row has settled.
 
 ## Endpoints
 
@@ -46,9 +46,20 @@ case-insensitive text matching for player and team. Market names, signed
 American odds, percentages, percentage-point edges, and UTC detail timestamps
 are formatted in the browser without modifying the API values.
 
-Settled counts, outcomes, paper P&L, realized ROI, and Brier score are displayed
-only when persisted settlements exist. The zero-settlement state explicitly
-says that metrics will appear after prospective observations are settled.
+Settled/unsettled counts describe immutable observations. The Brier score is a
+model-calibration metric computed over settled raw side observations with a
+binary win/loss outcome; pushes are excluded. Because OVER and UNDER terms can
+be paired and correlated, the dashboard explicitly says these observations are
+not a betting record.
+
+Strategy W/L, paper P&L, realized ROI, and grouped results are computed only by
+joining `research_selection_journal` to `shadow_observations` and
+`shadow_settlements` on `observation_id`, filtered to `selected = true`. A
+`selected = false` row never contributes. With no selected rows, the API emits
+`status: awaiting_selections`, `available: false`, and `realized_roi: null`;
+the dashboard states that no prospective selections have been recorded rather
+than displaying raw settlement results or a zero ROI. This is read-only and no
+historical selection is inferred or backfilled.
 
 Credential-like keys, URLs, and credential-shaped text in legacy JSON/error
 fields are redacted. Raw payloads and database/private configuration are never

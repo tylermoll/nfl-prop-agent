@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.research import ResearchRepository, get_repository
 from app.shadow_storage import (metadata, observations, pregame_context_snapshots,
-                                scheduler_executions, scheduler_slots, settlements)
+                                scheduler_executions, scheduler_slots, selection_journal, settlements)
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -79,8 +79,11 @@ def test_empty_database_and_html(research_client):
     assert client.get("/research/observations").json()["items"] == []
     summary = client.get("/research/summary").json()
     assert summary["total_observations"] == 0 and summary["latest_quota_state"] is None
-    assert summary["performance_metrics"] is None
-    assert summary["performance_note"] == "Performance metrics will appear after prospective observations are settled."
+    assert summary["model_evaluation"] is None
+    assert summary["strategy_performance"] == {
+        "available": False, "status": "awaiting_selections", "selected_count": 0,
+        "settled_count": 0, "realized_roi": None,
+        "note": "No prospective strategy selections have been recorded yet."}
     page = client.get("/research").text
     assert "not betting recommendations" in page
     assert "Waiting for first scheduled capture" in page
@@ -97,7 +100,8 @@ def test_dashboard_is_read_only_and_has_filters_without_recommendation_labels(re
     assert "fetch('/research/observations?limit=200')" in page
     assert "method=\"post\"" not in page.lower()
     assert not any(label in page for label in (">BET<", ">PASS<", ">LOCK<", "BEST BET"))
-    assert "Performance metrics will appear after prospective observations are settled." in page
+    assert "Awaiting prospective selections." in page
+    assert "Calibration over raw settled side observations" in page
     assert calls == []
 
 
@@ -162,13 +166,60 @@ def test_date_filter_summary_and_missing_404(research_client):
     assert result["settlement_counts"] == {"settled": 1, "unsettled": 1}
     assert result["scheduler_capture_counts"]["failed"] == 1
     assert result["latest_successful_execution"]["execution_id"] == "exec-1"
-    performance = result["performance_metrics"]
-    assert performance["settled_count"] == 1 and performance["wins"] == 1
-    assert performance["paper_profit_loss"] == pytest.approx(9.09)
-    assert performance["realized_roi"] == pytest.approx(.909)
-    assert performance["brier_score"] == pytest.approx((.56-1) ** 2)
+    performance = result["strategy_performance"]
+    assert performance["status"] == "awaiting_selections"
+    assert performance["realized_roi"] is None and "wins" not in performance
+    evaluation = result["model_evaluation"]
+    assert evaluation["evaluation_unit"] == "raw_side_observation"
+    assert evaluation["brier_score"] == pytest.approx((.56-1) ** 2)
     assert result["represented_matchups"] == 1 and calls == []
     assert client.get("/research/observations/missing").status_code == 404
+
+
+def test_paired_raw_sides_are_model_evaluation_not_strategy_performance(research_client):
+    client, engine, _ = research_client
+    over = observation_row("pair-over", side="over", model_probability=.6)
+    under = observation_row("pair-under", side="under", model_probability=.4)
+    with engine.begin() as conn:
+        conn.execute(insert(observations), [over, under])
+        conn.execute(insert(settlements), [
+            {"observation_id": "pair-over", "settled_at_utc": NOW, "actual_value": 270,
+             "result": "win", "profit_loss_per_dollar": .909, "fixed_unit": 10,
+             "fixed_unit_profit_loss": 9.09},
+            {"observation_id": "pair-under", "settled_at_utc": NOW, "actual_value": 270,
+             "result": "loss", "profit_loss_per_dollar": -1, "fixed_unit": 10,
+             "fixed_unit_profit_loss": -10}])
+    summary = client.get("/research/summary").json()
+    assert summary["model_evaluation"]["settled_observation_count"] == 2
+    assert summary["model_evaluation"]["brier_score"] == pytest.approx(.16)
+    assert summary["strategy_performance"]["status"] == "awaiting_selections"
+    assert "wins" not in summary["strategy_performance"]
+
+
+def test_only_selected_true_settlements_contribute_to_strategy_performance(research_client):
+    client, engine, _ = research_client
+    selected = observation_row("selected", side="over")
+    rejected = observation_row("rejected", side="under", model_probability=.44)
+    with engine.begin() as conn:
+        conn.execute(insert(observations), [selected, rejected])
+        conn.execute(insert(settlements), [
+            {"observation_id": "selected", "settled_at_utc": NOW, "actual_value": 270,
+             "result": "win", "profit_loss_per_dollar": .909, "fixed_unit": 10,
+             "fixed_unit_profit_loss": 9.09},
+            {"observation_id": "rejected", "settled_at_utc": NOW, "actual_value": 270,
+             "result": "loss", "profit_loss_per_dollar": -1, "fixed_unit": 10,
+             "fixed_unit_profit_loss": -10}])
+        conn.execute(insert(selection_journal), [
+            {"journal_id": "j-selected", "observation_id": "selected", "selected": True,
+             "intended_stake": 10, "selected_at_utc": NOW, "reason_codes": ["model_edge"]},
+            {"journal_id": "j-rejected", "observation_id": "rejected", "selected": False,
+             "intended_stake": None, "selected_at_utc": NOW, "reason_codes": []}])
+    performance = client.get("/research/summary").json()["strategy_performance"]
+    assert performance["available"] is True
+    assert performance["selected_count"] == performance["settled_count"] == 1
+    assert (performance["wins"], performance["losses"], performance["pushes"]) == (1, 0, 0)
+    assert performance["paper_profit_loss"] == pytest.approx(9.09)
+    assert performance["realized_roi"] == pytest.approx(.909)
 
 
 def test_research_has_no_mutation_routes(research_client):
