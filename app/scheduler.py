@@ -141,9 +141,11 @@ class SnapshotScheduler:
     def __init__(self, *, odds: Any, store: Any, kalshi: Any,
                  load_model: Callable[[], Any],
                  build_observations: Callable[[DueCapture, list, list, Any, datetime], list[dict]],
+                 select_decisions: Callable[[list[dict], Any, datetime], list[dict]] | None = None,
                  config: SchedulerConfig = SchedulerConfig(), now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.odds, self.store, self.kalshi = odds, store, kalshi
         self.load_model, self.build_observations = load_model, build_observations
+        self.select_decisions = select_decisions
         self.config, self.now = config, now
 
     async def run(self, *, dry_run: bool = False) -> dict[str, Any]:
@@ -225,8 +227,17 @@ class SnapshotScheduler:
                     if rejected:
                         report["rejected_props"].extend(rejected)
                     if not observations: raise RuntimeError("no eligible Hard Rock observations")
+                    decisions = (self.select_decisions(observations, self.store, self.now())
+                                 if self.select_decisions else None)
                     stage = "database"
-                    if hasattr(self.store, "complete_capture"):
+                    if decisions is not None and hasattr(self.store, "complete_capture_with_decisions"):
+                        old = self.store.slot_state(capture.event_id, capture.slot, capture.target_time_utc)
+                        self.store.complete_capture_with_decisions(observations, decisions, {
+                            "event_id": capture.event_id, "slot": capture.slot,
+                            "target_time_utc": capture.target_time_utc, "status": "completed",
+                            "attempts": int(old.get("attempts", 0) if old else 0) + 1, "reason": None,
+                            "updated_at_utc": self.now()})
+                    elif hasattr(self.store, "complete_capture"):
                         old = self.store.slot_state(capture.event_id, capture.slot, capture.target_time_utc)
                         self.store.complete_capture(observations, {"event_id": capture.event_id, "slot": capture.slot,
                             "target_time_utc": capture.target_time_utc, "status": "completed",

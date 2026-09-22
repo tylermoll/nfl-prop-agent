@@ -163,3 +163,15 @@ def test_successful_slot_is_idempotent_and_does_not_repeat_paid_request():
     assert asyncio.run(scheduler.run())["completed"]
     assert not asyncio.run(scheduler.run())["selected"]
     assert odds.targeted == ["g"] and odds.usage["quota_consumed"] == 3
+
+
+def test_decision_generation_failure_never_completes_or_persists_capture():
+    odds, store, kalshi = Odds([event("24h")]), Store(), Kalshi()
+    scheduler = SnapshotScheduler(odds=odds, store=store, kalshi=kalshi,
+        load_model=lambda: object(), build_observations=lambda *_: [{"observation_id": "new"}],
+        select_decisions=lambda *_: (_ for _ in ()).throw(ValueError("invalid decision")),
+        now=lambda: NOW)
+    report = asyncio.run(scheduler.run())
+    assert not report["completed"] and report["failed"]
+    assert store.observations == []
+    assert store.states[("g", "24h", NOW)]["status"] == "failed"

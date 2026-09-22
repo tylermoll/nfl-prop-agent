@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     shadow_starting_bankroll: float = 100
     shadow_nominal_unit: float = 10
     shadow_minimum_report_sample: int = 30
+    # V2 decision writes remain disabled while this is unset. Choosing a window
+    # is an explicit prospective deployment decision, never a backtest result.
+    shadow_selection_eligible_window: str | None = None
+    shadow_selection_policy_name: str = "integrity"
+    shadow_selection_policy_version: str = "v2-phase1"
     settlement_cache_dir: str = "data/historical/raw"
     settlement_nflverse_refresh: bool = True
     scheduler_slots_minutes: tuple[int, ...] = (1440, 360, 90, 15)
