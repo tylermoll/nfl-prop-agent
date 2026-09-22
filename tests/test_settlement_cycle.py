@@ -80,7 +80,11 @@ def test_nonfinal_game_remains_unsettled_and_does_not_fetch_weekly(store):
     client = FootballOnly(final=False)
     report = run(store, client)
     assert report["games_final"] == 0 and not settlement_rows(store)
-    assert [call[0] for call in client.calls] == ["schedules"]
+    # Settlement refreshes schedules once; the identity and residual audits
+    # then re-read the same cached schedule without refreshing it.
+    assert client.calls == [("schedules", None, True),
+                            ("schedules", None, False),
+                            ("schedules", None, False)]
 
 
 def test_final_missing_result_is_retryable_and_never_zero(store):
@@ -149,7 +153,10 @@ def test_groups_downloads_by_season_not_observation(store):
     add(store, observation("o1"), observation("o2", market="player_receptions", line=5))
     client = FootballOnly()
     run(store, client)
-    assert client.calls == [("schedules", None, True), ("weekly_stats", 2026, True)]
+    assert client.calls == [("schedules", None, True),
+                            ("schedules", None, False),
+                            ("schedules", None, False),
+                            ("weekly_stats", 2026, True)]
 
 
 def normalized_games(*rows):
