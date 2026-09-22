@@ -27,6 +27,8 @@ def _configure(monkeypatch, tmp_path, age=None, maximum=21600):
         os.utime(path, (timestamp, timestamp))
     monkeypatch.setattr(settings, "football_current_feature_path", str(path))
     monkeypatch.setattr(settings, "football_current_feature_max_age_seconds", maximum)
+    monkeypatch.setattr(settings, "shadow_selection_feature_refresh_headroom_seconds", 300)
+    monkeypatch.setattr(settings, "shadow_selection_eligible_window", None)
     return path
 
 
@@ -114,3 +116,62 @@ def test_cycle_has_no_training_or_order_entry_points():
     import scripts.run_production_cycle as module
     names = dir(module)
     assert not any(name.startswith(("train", "bootstrap", "place_", "submit_", "wager_")) for name in names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("feature_age", "refresh_expected"), [(300, False), (3300, False), (3300.001, True)])
+async def test_v2_eligible_cycle_refreshes_with_one_scheduler_interval_headroom(
+        monkeypatch, tmp_path, feature_age, refresh_expected):
+    path = _configure(monkeypatch, tmp_path, age=60)
+    monkeypatch.setattr(settings, "shadow_selection_eligible_window", "90m")
+    states = iter([(True, feature_age), (True, 0.0)])
+    refreshes = []
+
+    def refresh(output):
+        refreshes.append(output)
+        return None, SimpleNamespace(player_rows_by_market={})
+
+    report, code = await run_cycle(now=NOW, materialize=refresh,
+        scheduler=lambda **_: _async_value(_scheduler_report()),
+        feature_state=lambda *_: next(states),)
+    assert code == 0
+    assert bool(refreshes) is refresh_expected
+    assert report["eligible_capture_due"] is True
+    assert report["v2_feature_max_age_seconds"] == 3600
+    assert report["v2_feature_refresh_headroom_seconds"] == 300
+    assert report["feature_cache_max_age_seconds"] == 21600
+    assert report["feature_refresh_reason"] == (
+        "v2_eligible_capture_freshness_headroom" if refresh_expected else None)
+
+
+@pytest.mark.asyncio
+async def test_noneligible_cycle_keeps_broader_cache_policy(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path, age=4000)
+    inspected = []
+    report, code = await run_cycle(now=NOW,
+        materialize=lambda *_: pytest.fail("four-hour observational cache should be reused"),
+        scheduler=lambda **_: _async_value(_scheduler_report()),
+        feature_state=lambda *_: inspected.append(True))
+    assert code == 0 and not report["feature_refresh_attempted"] and inspected == []
+
+
+@pytest.mark.asyncio
+async def test_failed_v2_headroom_refresh_never_runs_scheduler(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path, age=60)
+    monkeypatch.setattr(settings, "shadow_selection_eligible_window", "90m")
+    scheduler_called = False
+
+    async def scheduler(**_):
+        nonlocal scheduler_called
+        scheduler_called = True
+
+    report, code = await run_cycle(now=NOW,
+        materialize=lambda *_: (_ for _ in ()).throw(RuntimeError("refresh failed")),
+        scheduler=scheduler, feature_state=lambda *_: (True, 3500))
+    assert code == 1 and not scheduler_called
+    assert report["feature_refresh_succeeded"] is False
+    assert report["feature_refresh_reason"] == "v2_eligible_capture_freshness_headroom"
+
+
+async def _async_value(value):
+    return value

@@ -146,6 +146,11 @@ strictly read-only: the default command loads the three artifacts and current
 feature cache, scores representative upcoming rows, and queries database
 connectivity/history without creating tables, observations, settlements,
 capture slots, or scheduler executions. It makes no Odds API or Kalshi calls.
+Its machine-readable `v2_status` is `READY` only when the effective frozen
+policy configuration, exact artifact hashes, uncertainty contract, actual
+feature-row timestamps, and decision-table connectivity all pass. The report
+includes both the six-hour operational cache limit and the independent one-hour
+V2 row-freshness limit.
 
 ```bash
 # Railway command: local inputs and database only (no provider requests)
@@ -161,9 +166,16 @@ It reports event, book, market, HTTP-request, and quota counts. It does not run
 capture scheduling and never contacts Kalshi.
 
 Set `FOOTBALL_CURRENT_FEATURE_PATH=/models/current_features.parquet` and optionally
-override `FOOTBALL_CURRENT_FEATURE_MAX_AGE_SECONDS=21600` (six hours). The cycle
+override `FOOTBALL_CURRENT_FEATURE_MAX_AGE_SECONDS=21600` (six hours). That
+broader limit continues to control purely observational cycles. When the frozen
+`90m` decision window is enabled and a cached kickoff is within its configured
+±10-minute scheduler tolerance, the cycle instead refreshes if the oldest
+relevant feature row has less than one five-minute scheduler interval remaining
+before the 3,600-second V2 hard limit. A failed refresh stops the cycle before
+provider calls or persistence; it never relaxes the selection freshness gate.
+The cycle
 holds a nonblocking advisory `flock` on
 `/models/.current_features.parquet.production-cycle.lock` from the freshness check
-through scheduler completion. An overlapping invocation exits nonzero. Only a
-missing or stale cache invokes the existing nflverse current-feature materializer;
-its atomic replacement remains responsible for preserving a prior valid cache.
+through scheduler completion. An overlapping invocation exits nonzero. The
+existing nflverse current-feature materializer atomically replaces the cache and
+preserves a prior valid file if construction fails.

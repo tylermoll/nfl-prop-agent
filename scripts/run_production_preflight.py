@@ -25,7 +25,12 @@ from app.modeling.benchmark import MARKETS
 from app.production_pipeline import CurrentFeatureCache, ProductionModels, load_production_models
 from app.providers.the_odds_api import TheOddsApiProvider, _parse_datetime
 from app.scheduler import sanitized_error
-from app.shadow_storage import normalize_database_url, scheduler_executions
+from app.shadow_selection import (FEATURE_MAX_AGE_SECONDS, FROZEN_ELIGIBLE_WINDOW,
+                                  FROZEN_POLICY_NAME, FROZEN_POLICY_VERSION,
+                                  MODEL_VERSION_ALLOWLIST, UNCERTAINTY_METHOD,
+                                  UNCERTAINTY_VERSION)
+from app.shadow_storage import (normalize_database_url, opportunity_decisions,
+                                scheduler_executions)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -79,6 +84,14 @@ def _database_check(engine_factory: Callable[..., Any]) -> dict[str, Any]:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1")).scalar_one()
+            try:
+                decision_count = connection.execute(select(text("count(*)")).select_from(
+                    opportunity_decisions)).scalar_one()
+            except (ProgrammingError, OperationalError, DBAPIError) as exc:
+                return _check("database_read_only", "failed", connectivity="passed",
+                              decision_table_available=False, decision_count=None,
+                              latest_scheduler_execution=None,
+                              reasons=[f"shadow_opportunity_decisions is unavailable: {type(exc).__name__}"])
             latest = None
             try:
                 row = connection.execute(select(scheduler_executions).order_by(
@@ -97,9 +110,11 @@ def _database_check(engine_factory: Callable[..., Any]) -> dict[str, Any]:
                 # Connectivity is healthy, but a brand-new database can have no
                 # scheduler table yet. Preflight must not create it.
                 return _check("database_read_only", "warning", connectivity="passed",
+                              decision_table_available=True, decision_count=decision_count,
                               latest_scheduler_execution=None,
                               reasons=["scheduler execution history is unavailable; no schema was created"])
         return _check("database_read_only", "passed", connectivity="passed",
+                      decision_table_available=True, decision_count=decision_count,
                       latest_scheduler_execution=latest,
                       reasons=[] if latest else ["no prior scheduler execution found"])
     finally:
@@ -182,17 +197,49 @@ async def run_preflight(*, check_live_props: bool = False, now: datetime | None 
                         odds_provider_factory: Callable[..., Any] = TheOddsApiProvider) -> tuple[dict, int]:
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     report: dict[str, Any] = {"generated_at_utc": current.isoformat(), "read_only": True,
-                              "live_prop_check_requested": check_live_props, "checks": []}
+        "live_prop_check_requested": check_live_props,
+        "policy": {"name": FROZEN_POLICY_NAME, "version": FROZEN_POLICY_VERSION,
+            "effective_eligible_window": settings.shadow_selection_eligible_window,
+            "required_eligible_window": FROZEN_ELIGIBLE_WINDOW,
+            "nominal_unit": settings.shadow_nominal_unit,
+            "supported_markets": list(MARKETS),
+            "provider_max_age_seconds": settings.scheduler_provider_stale_seconds,
+            "feature_max_age_seconds": FEATURE_MAX_AGE_SECONDS,
+            "broader_cache_max_age_seconds": settings.football_current_feature_max_age_seconds,
+            "uncertainty_method": UNCERTAINTY_METHOD, "uncertainty_version": UNCERTAINTY_VERSION},
+        "checks": []}
+    policy_reasons = []
+    if settings.shadow_selection_policy_name != FROZEN_POLICY_NAME:
+        policy_reasons.append("configured policy name does not match frozen V2.0")
+    if settings.shadow_selection_policy_version != FROZEN_POLICY_VERSION:
+        policy_reasons.append("configured policy version does not match frozen V2.0")
+    if settings.shadow_selection_eligible_window != FROZEN_ELIGIBLE_WINDOW:
+        policy_reasons.append("effective eligible window is not the frozen 90m window")
+    if settings.shadow_nominal_unit != 10.0:
+        policy_reasons.append("nominal unit is not exactly 10.00")
+    if settings.scheduler_provider_stale_seconds != 300:
+        policy_reasons.append("provider freshness does not match frozen V2.0")
+    report["checks"].append(_check("v2_policy_configuration",
+        "failed" if policy_reasons else "passed", reasons=policy_reasons))
     report["checks"].append(_configuration_check(check_live_props))
     models = None
     try:
         models = model_loader()
         _artifact_provenance(models)
-        report["checks"].append(_check("production_model_artifacts", "passed", count=len(models.scorers),
-            artifacts={market: {"path": data["artifact_path"], "sha256": data["artifact_sha256"],
-                                "model_version": data["model_version"],
-                                "required_feature_count": len(data["required_features"])}
-                       for market, data in models.provenance.items()}, reasons=[]))
+        artifacts = {market: {"path": data["artifact_path"], "sha256": data["artifact_sha256"],
+            "model_version": data["model_version"], "expected_model_version": MODEL_VERSION_ALLOWLIST[market],
+            "allowlist_match": data["artifact_sha256"] == MODEL_VERSION_ALLOWLIST[market] and
+                               data["model_version"] == MODEL_VERSION_ALLOWLIST[market],
+            "uncertainty_method": models.scorers[market].METHOD,
+            "uncertainty_version": models.scorers[market].VERSION,
+            "required_feature_count": len(data["required_features"])}
+            for market, data in models.provenance.items()}
+        mismatches = [market for market, data in artifacts.items() if not data["allowlist_match"] or
+                      data["uncertainty_method"] != UNCERTAINTY_METHOD or
+                      data["uncertainty_version"] != UNCERTAINTY_VERSION]
+        report["checks"].append(_check("production_model_artifacts",
+            "failed" if mismatches else "passed", count=len(models.scorers), artifacts=artifacts,
+            reasons=[f"artifact identity or uncertainty contract mismatch: {market}" for market in mismatches]))
     except Exception as exc:
         report["checks"].append(_check("production_model_artifacts", "failed",
                                        reasons=[sanitized_error(exc)]))
@@ -209,18 +256,26 @@ async def run_preflight(*, check_live_props: bool = False, now: datetime | None 
                 raise ValueError("no upcoming NFL feature rows")
             # Freshness is fail-closed against the oldest represented build;
             # one newer row must not conceal stale rows in a mixed cache.
-            built = future._built.min().to_pydatetime()
+            built_min = future._built.min().to_pydatetime()
+            built_max = future._built.max().to_pydatetime()
             cutoff = future._asof.max().to_pydatetime()
-            age = max(0.0, (current - built).total_seconds())
+            maximum_age = (current - built_min).total_seconds()
+            minimum_age = (current - built_max).total_seconds()
             maximum = settings.football_current_feature_max_age_seconds
-            if age > maximum:
-                raise ValueError(f"feature cache is stale ({age:.1f}s > {maximum}s)")
+            v2_fresh = minimum_age >= 0 and maximum_age <= FEATURE_MAX_AGE_SECONDS
             games = (future[["_event", "away_team", "home_team", "_kickoff"]].drop_duplicates()
                      .sort_values("_kickoff"))
             by_game_market = future.groupby(["_event", "canonical_market"]).size()
-            report["checks"].append(_check("current_feature_cache", "passed",
+            freshness_reasons = ([] if v2_fresh else
+                [f"feature rows do not satisfy V2 freshness (oldest={maximum_age:.1f}s, "
+                 f"newest={minimum_age:.1f}s, limit={FEATURE_MAX_AGE_SECONDS:.0f}s)"])
+            report["checks"].append(_check("current_feature_cache", "passed" if v2_fresh else "failed",
                 path=str(Path(settings.football_current_feature_path).expanduser().resolve()),
-                feature_build_timestamp=built, source_cutoff=cutoff, age_seconds=age,
+                feature_file_exists=Path(settings.football_current_feature_path).expanduser().is_file(),
+                feature_built_at_utc_min=built_min, feature_built_at_utc_max=built_max,
+                feature_age_seconds_min=minimum_age, feature_age_seconds_max=maximum_age,
+                v2_feature_max_age_seconds=FEATURE_MAX_AGE_SECONDS, v2_freshness_satisfied=v2_fresh,
+                source_cutoff=cutoff,
                 configured_maximum_age_seconds=maximum,
                 upcoming_games=[{"event_identity": row["_event"], "away_team": row["away_team"],
                                  "home_team": row["home_team"], "kickoff_utc": row["_kickoff"]}
@@ -229,9 +284,16 @@ async def run_preflight(*, check_live_props: bool = False, now: datetime | None 
                     for market in MARKETS} for event in games._event},
                 unique_eligible_players_by_market={market: int(group.player_id.nunique())
                     for market, group in future.groupby("canonical_market")},
-                exact_identity_duplicates=int(future.duplicated(["player_id", "_kickoff", "canonical_market"]).sum()), reasons=[]))
+                exact_identity_duplicates=int(future.duplicated(["player_id", "_kickoff", "canonical_market"]).sum()),
+                reasons=freshness_reasons))
         except Exception as exc:
-            report["checks"].append(_check("current_feature_cache", "failed", reasons=[sanitized_error(exc)]))
+            configured_path = Path(settings.football_current_feature_path).expanduser() \
+                if settings.football_current_feature_path else None
+            report["checks"].append(_check("current_feature_cache", "failed",
+                path=str(configured_path.resolve()) if configured_path else None,
+                feature_file_exists=bool(configured_path and configured_path.is_file()),
+                v2_feature_max_age_seconds=FEATURE_MAX_AGE_SECONDS,
+                v2_freshness_satisfied=False, reasons=[sanitized_error(exc)]))
 
     if models is not None and not future.empty:
         try:
@@ -279,7 +341,11 @@ async def run_preflight(*, check_live_props: bool = False, now: datetime | None 
                                        reasons=["use --check-live-props to opt in; no provider request was made"]))
     statuses = {item["status"] for item in report["checks"]}
     report["status"] = "failed" if "failed" in statuses else "warning" if "warning" in statuses else "ready"
-    return report, int(report["status"] == "failed")
+    report["ready"] = report["status"] == "ready"
+    report["v2_status"] = "READY" if report["ready"] else "NOT_READY"
+    report["reasons"] = [reason for check in report["checks"] if check["status"] in {"failed", "warning"}
+                         for reason in check.get("reasons", [])]
+    return report, int(not report["ready"])
 
 
 def main() -> int:

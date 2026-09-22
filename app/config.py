@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     scheduler_retry_budget: int = 2
     scheduler_provider_stale_seconds: int = 300
     scheduler_model_stale_seconds: int = 3600
+    # Reserve one scheduler interval before the V2 freshness ceiling so the
+    # eligible capture can refresh and score without racing the hard gate.
+    shadow_selection_feature_refresh_headroom_seconds: int = 300
     football_artifact_player_pass_yds: str | None = None
     football_artifact_player_reception_yds: str | None = None
     football_artifact_player_receptions: str | None = None
